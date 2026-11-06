@@ -1,0 +1,1167 @@
+{
+  "datasets": [
+    {
+      "name": "summary_kpis",
+      "displayName": "Summary Kpis",
+      "queryLines": [
+        "WITH priced AS (\n",
+        "    SELECT\n",
+        "        u.account_id,\n",
+        "        CAST(u.workspace_id AS STRING) AS workspace_id,\n",
+        "        u.record_id,\n",
+        "        u.usage_date,\n",
+        "        u.usage_end_time,\n",
+        "        LOWER(COALESCE(u.identity_metadata.run_as, 'unattributed')) AS user_identity,\n",
+        "        COALESCE(u.usage_metadata.genie.surface, 'UNKNOWN') AS genie_product,\n",
+        "        u.sku_name,\n",
+        "        CAST(u.usage_quantity AS DOUBLE) AS total_dbus,\n",
+        "        CASE WHEN u.sku_name = 'GENIE_FREE_USAGE' THEN CAST(u.usage_quantity AS DOUBLE) ELSE 0D END AS free_dbus,\n",
+        "        CASE WHEN u.sku_name <> 'GENIE_FREE_USAGE' THEN CAST(u.usage_quantity AS DOUBLE) ELSE 0D END AS billed_dbus,\n",
+        "        CASE\n",
+        "            WHEN u.sku_name = 'GENIE_FREE_USAGE' THEN 0D\n",
+        "            WHEN lp.pricing.effective_list.default IS NULL THEN NULL\n",
+        "            ELSE CAST(u.usage_quantity AS DOUBLE) * CAST(lp.pricing.effective_list.default AS DOUBLE)\n",
+        "        END AS estimated_cost_usd,\n",
+        "        CASE WHEN u.sku_name <> 'GENIE_FREE_USAGE' AND lp.pricing.effective_list.default IS NULL THEN 1 ELSE 0 END AS missing_price,\n",
+        "        ROW_NUMBER() OVER (\n",
+        "            PARTITION BY u.account_id, u.record_id\n",
+        "            ORDER BY lp.price_start_time DESC NULLS LAST\n",
+        "        ) AS price_rank\n",
+        "    FROM system.billing.usage u\n",
+        "    LEFT JOIN system.billing.list_prices lp\n",
+        "      ON u.sku_name = lp.sku_name\n",
+        "     AND u.cloud = lp.cloud\n",
+        "     AND u.usage_unit = lp.usage_unit\n",
+        "     AND u.usage_end_time >= lp.price_start_time\n",
+        "     AND (lp.price_end_time IS NULL OR u.usage_end_time < lp.price_end_time)\n",
+        "    WHERE u.billing_origin_product = 'GENIE'\n",
+        "      AND u.usage_unit = 'DBU'\n",
+        "      AND u.usage_date >= DATE_SUB(CURRENT_DATE(), 89)\n",
+        "), base AS (\n",
+        "    SELECT * FROM priced WHERE price_rank = 1\n",
+        ")\n",
+        "\n",
+        "SELECT\n",
+        "    COUNT(DISTINCT CASE WHEN usage_date >= DATE_SUB(CURRENT_DATE(), 29) THEN user_identity END) AS active_users_30d,\n",
+        "    ROUND(SUM(CASE WHEN usage_date >= DATE_SUB(CURRENT_DATE(), 29) THEN total_dbus ELSE 0 END), 2) AS total_dbus_30d,\n",
+        "    ROUND(SUM(CASE WHEN usage_date >= DATE_SUB(CURRENT_DATE(), 29) THEN billed_dbus ELSE 0 END), 2) AS billed_dbus_30d,\n",
+        "    ROUND(SUM(CASE WHEN usage_date >= DATE_SUB(CURRENT_DATE(), 29) THEN COALESCE(estimated_cost_usd, 0D) ELSE 0D END), 2) AS estimated_cost_usd_30d,\n",
+        "    ROUND(SUM(CASE WHEN usage_date >= DATE_TRUNC('MONTH', CURRENT_DATE()) THEN COALESCE(estimated_cost_usd, 0D) ELSE 0D END), 2) AS mtd_estimated_cost_usd,\n",
+        "    ROUND(\n",
+        "        SUM(CASE WHEN usage_date >= DATE_TRUNC('MONTH', CURRENT_DATE()) THEN COALESCE(estimated_cost_usd, 0D) ELSE 0D END)\n",
+        "        * DAY(LAST_DAY(CURRENT_DATE())) / GREATEST(DAY(CURRENT_DATE()), 1), 2\n",
+        "    ) AS projected_month_end_cost_usd,\n",
+        "    SUM(CASE WHEN usage_date >= DATE_SUB(CURRENT_DATE(), 29) THEN missing_price ELSE 0 END) AS unpriced_paid_rows_30d,\n",
+        "    MAX(usage_date) AS latest_usage_date,\n",
+        "    COUNT(DISTINCT workspace_id) AS workspaces_seen_30d,\n",
+        "    ROUND(100D * COALESCE((\n",
+        "        SELECT SUM(est_usd) FROM (\n",
+        "            SELECT user_identity, SUM(COALESCE(estimated_cost_usd, 0D)) AS est_usd,\n",
+        "                   ROW_NUMBER() OVER (ORDER BY SUM(COALESCE(estimated_cost_usd,0D)) DESC) AS rnk\n",
+        "            FROM base\n",
+        "            WHERE usage_date >= DATE_SUB(CURRENT_DATE(), 29)\n",
+        "            GROUP BY user_identity\n",
+        "        ) ranked WHERE rnk <= 5\n",
+        "    ), 0D) /\n",
+        "    NULLIF((SELECT SUM(COALESCE(estimated_cost_usd,0D)) FROM base WHERE usage_date >= DATE_SUB(CURRENT_DATE(), 29)), 0D), 1) AS top5_cost_share_pct\n",
+        "FROM base\n"
+      ]
+    },
+    {
+      "name": "daily_cost_trend",
+      "displayName": "Daily Cost Trend",
+      "queryLines": [
+        "WITH priced AS (\n",
+        "    SELECT\n",
+        "        u.account_id,\n",
+        "        CAST(u.workspace_id AS STRING) AS workspace_id,\n",
+        "        u.record_id,\n",
+        "        u.usage_date,\n",
+        "        u.usage_end_time,\n",
+        "        LOWER(COALESCE(u.identity_metadata.run_as, 'unattributed')) AS user_identity,\n",
+        "        COALESCE(u.usage_metadata.genie.surface, 'UNKNOWN') AS genie_product,\n",
+        "        u.sku_name,\n",
+        "        CAST(u.usage_quantity AS DOUBLE) AS total_dbus,\n",
+        "        CASE WHEN u.sku_name = 'GENIE_FREE_USAGE' THEN CAST(u.usage_quantity AS DOUBLE) ELSE 0D END AS free_dbus,\n",
+        "        CASE WHEN u.sku_name <> 'GENIE_FREE_USAGE' THEN CAST(u.usage_quantity AS DOUBLE) ELSE 0D END AS billed_dbus,\n",
+        "        CASE\n",
+        "            WHEN u.sku_name = 'GENIE_FREE_USAGE' THEN 0D\n",
+        "            WHEN lp.pricing.effective_list.default IS NULL THEN NULL\n",
+        "            ELSE CAST(u.usage_quantity AS DOUBLE) * CAST(lp.pricing.effective_list.default AS DOUBLE)\n",
+        "        END AS estimated_cost_usd,\n",
+        "        CASE WHEN u.sku_name <> 'GENIE_FREE_USAGE' AND lp.pricing.effective_list.default IS NULL THEN 1 ELSE 0 END AS missing_price,\n",
+        "        ROW_NUMBER() OVER (\n",
+        "            PARTITION BY u.account_id, u.record_id\n",
+        "            ORDER BY lp.price_start_time DESC NULLS LAST\n",
+        "        ) AS price_rank\n",
+        "    FROM system.billing.usage u\n",
+        "    LEFT JOIN system.billing.list_prices lp\n",
+        "      ON u.sku_name = lp.sku_name\n",
+        "     AND u.cloud = lp.cloud\n",
+        "     AND u.usage_unit = lp.usage_unit\n",
+        "     AND u.usage_end_time >= lp.price_start_time\n",
+        "     AND (lp.price_end_time IS NULL OR u.usage_end_time < lp.price_end_time)\n",
+        "    WHERE u.billing_origin_product = 'GENIE'\n",
+        "      AND u.usage_unit = 'DBU'\n",
+        "      AND u.usage_date >= DATE_SUB(CURRENT_DATE(), 89)\n",
+        "), base AS (\n",
+        "    SELECT * FROM priced WHERE price_rank = 1\n",
+        ")\n",
+        "\n",
+        "SELECT\n",
+        "    usage_date AS day,\n",
+        "    ROUND(SUM(total_dbus), 2) AS total_dbus,\n",
+        "    ROUND(SUM(billed_dbus), 2) AS billed_dbus,\n",
+        "    ROUND(SUM(COALESCE(estimated_cost_usd, 0D)), 2) AS estimated_cost_usd\n",
+        "FROM base\n",
+        "WHERE usage_date >= DATE_SUB(CURRENT_DATE(), 29)\n",
+        "GROUP BY usage_date\n",
+        "ORDER BY usage_date\n"
+      ]
+    },
+    {
+      "name": "product_summary",
+      "displayName": "Product Summary",
+      "queryLines": [
+        "WITH priced AS (\n",
+        "    SELECT\n",
+        "        u.account_id,\n",
+        "        CAST(u.workspace_id AS STRING) AS workspace_id,\n",
+        "        u.record_id,\n",
+        "        u.usage_date,\n",
+        "        u.usage_end_time,\n",
+        "        LOWER(COALESCE(u.identity_metadata.run_as, 'unattributed')) AS user_identity,\n",
+        "        COALESCE(u.usage_metadata.genie.surface, 'UNKNOWN') AS genie_product,\n",
+        "        u.sku_name,\n",
+        "        CAST(u.usage_quantity AS DOUBLE) AS total_dbus,\n",
+        "        CASE WHEN u.sku_name = 'GENIE_FREE_USAGE' THEN CAST(u.usage_quantity AS DOUBLE) ELSE 0D END AS free_dbus,\n",
+        "        CASE WHEN u.sku_name <> 'GENIE_FREE_USAGE' THEN CAST(u.usage_quantity AS DOUBLE) ELSE 0D END AS billed_dbus,\n",
+        "        CASE\n",
+        "            WHEN u.sku_name = 'GENIE_FREE_USAGE' THEN 0D\n",
+        "            WHEN lp.pricing.effective_list.default IS NULL THEN NULL\n",
+        "            ELSE CAST(u.usage_quantity AS DOUBLE) * CAST(lp.pricing.effective_list.default AS DOUBLE)\n",
+        "        END AS estimated_cost_usd,\n",
+        "        CASE WHEN u.sku_name <> 'GENIE_FREE_USAGE' AND lp.pricing.effective_list.default IS NULL THEN 1 ELSE 0 END AS missing_price,\n",
+        "        ROW_NUMBER() OVER (\n",
+        "            PARTITION BY u.account_id, u.record_id\n",
+        "            ORDER BY lp.price_start_time DESC NULLS LAST\n",
+        "        ) AS price_rank\n",
+        "    FROM system.billing.usage u\n",
+        "    LEFT JOIN system.billing.list_prices lp\n",
+        "      ON u.sku_name = lp.sku_name\n",
+        "     AND u.cloud = lp.cloud\n",
+        "     AND u.usage_unit = lp.usage_unit\n",
+        "     AND u.usage_end_time >= lp.price_start_time\n",
+        "     AND (lp.price_end_time IS NULL OR u.usage_end_time < lp.price_end_time)\n",
+        "    WHERE u.billing_origin_product = 'GENIE'\n",
+        "      AND u.usage_unit = 'DBU'\n",
+        "      AND u.usage_date >= DATE_SUB(CURRENT_DATE(), 89)\n",
+        "), base AS (\n",
+        "    SELECT * FROM priced WHERE price_rank = 1\n",
+        ")\n",
+        "\n",
+        "SELECT\n",
+        "    genie_product,\n",
+        "    COUNT(DISTINCT user_identity) AS users_30d,\n",
+        "    ROUND(SUM(total_dbus), 2) AS total_dbus,\n",
+        "    ROUND(SUM(billed_dbus), 2) AS billed_dbus,\n",
+        "    ROUND(SUM(COALESCE(estimated_cost_usd, 0D)), 2) AS estimated_cost_usd\n",
+        "FROM base\n",
+        "WHERE usage_date >= DATE_SUB(CURRENT_DATE(), 29)\n",
+        "GROUP BY genie_product\n",
+        "ORDER BY estimated_cost_usd DESC, billed_dbus DESC\n"
+      ]
+    },
+    {
+      "name": "workspace_summary",
+      "displayName": "Workspace Summary",
+      "queryLines": [
+        "WITH priced AS (\n",
+        "    SELECT\n",
+        "        u.account_id,\n",
+        "        CAST(u.workspace_id AS STRING) AS workspace_id,\n",
+        "        u.record_id,\n",
+        "        u.usage_date,\n",
+        "        u.usage_end_time,\n",
+        "        LOWER(COALESCE(u.identity_metadata.run_as, 'unattributed')) AS user_identity,\n",
+        "        COALESCE(u.usage_metadata.genie.surface, 'UNKNOWN') AS genie_product,\n",
+        "        u.sku_name,\n",
+        "        CAST(u.usage_quantity AS DOUBLE) AS total_dbus,\n",
+        "        CASE WHEN u.sku_name = 'GENIE_FREE_USAGE' THEN CAST(u.usage_quantity AS DOUBLE) ELSE 0D END AS free_dbus,\n",
+        "        CASE WHEN u.sku_name <> 'GENIE_FREE_USAGE' THEN CAST(u.usage_quantity AS DOUBLE) ELSE 0D END AS billed_dbus,\n",
+        "        CASE\n",
+        "            WHEN u.sku_name = 'GENIE_FREE_USAGE' THEN 0D\n",
+        "            WHEN lp.pricing.effective_list.default IS NULL THEN NULL\n",
+        "            ELSE CAST(u.usage_quantity AS DOUBLE) * CAST(lp.pricing.effective_list.default AS DOUBLE)\n",
+        "        END AS estimated_cost_usd,\n",
+        "        CASE WHEN u.sku_name <> 'GENIE_FREE_USAGE' AND lp.pricing.effective_list.default IS NULL THEN 1 ELSE 0 END AS missing_price,\n",
+        "        ROW_NUMBER() OVER (\n",
+        "            PARTITION BY u.account_id, u.record_id\n",
+        "            ORDER BY lp.price_start_time DESC NULLS LAST\n",
+        "        ) AS price_rank\n",
+        "    FROM system.billing.usage u\n",
+        "    LEFT JOIN system.billing.list_prices lp\n",
+        "      ON u.sku_name = lp.sku_name\n",
+        "     AND u.cloud = lp.cloud\n",
+        "     AND u.usage_unit = lp.usage_unit\n",
+        "     AND u.usage_end_time >= lp.price_start_time\n",
+        "     AND (lp.price_end_time IS NULL OR u.usage_end_time < lp.price_end_time)\n",
+        "    WHERE u.billing_origin_product = 'GENIE'\n",
+        "      AND u.usage_unit = 'DBU'\n",
+        "      AND u.usage_date >= DATE_SUB(CURRENT_DATE(), 89)\n",
+        "), base AS (\n",
+        "    SELECT * FROM priced WHERE price_rank = 1\n",
+        ")\n",
+        "\n",
+        "SELECT\n",
+        "    workspace_id,\n",
+        "    COUNT(DISTINCT user_identity) AS users_30d,\n",
+        "    ROUND(SUM(total_dbus), 2) AS total_dbus,\n",
+        "    ROUND(SUM(billed_dbus), 2) AS billed_dbus,\n",
+        "    ROUND(SUM(COALESCE(estimated_cost_usd, 0D)), 2) AS estimated_cost_usd\n",
+        "FROM base\n",
+        "WHERE usage_date >= DATE_SUB(CURRENT_DATE(), 29)\n",
+        "GROUP BY workspace_id\n",
+        "ORDER BY estimated_cost_usd DESC, billed_dbus DESC\n"
+      ]
+    },
+    {
+      "name": "top_users_cost",
+      "displayName": "Top Users Cost",
+      "queryLines": [
+        "WITH priced AS (\n",
+        "    SELECT\n",
+        "        u.account_id,\n",
+        "        CAST(u.workspace_id AS STRING) AS workspace_id,\n",
+        "        u.record_id,\n",
+        "        u.usage_date,\n",
+        "        u.usage_end_time,\n",
+        "        LOWER(COALESCE(u.identity_metadata.run_as, 'unattributed')) AS user_identity,\n",
+        "        COALESCE(u.usage_metadata.genie.surface, 'UNKNOWN') AS genie_product,\n",
+        "        u.sku_name,\n",
+        "        CAST(u.usage_quantity AS DOUBLE) AS total_dbus,\n",
+        "        CASE WHEN u.sku_name = 'GENIE_FREE_USAGE' THEN CAST(u.usage_quantity AS DOUBLE) ELSE 0D END AS free_dbus,\n",
+        "        CASE WHEN u.sku_name <> 'GENIE_FREE_USAGE' THEN CAST(u.usage_quantity AS DOUBLE) ELSE 0D END AS billed_dbus,\n",
+        "        CASE\n",
+        "            WHEN u.sku_name = 'GENIE_FREE_USAGE' THEN 0D\n",
+        "            WHEN lp.pricing.effective_list.default IS NULL THEN NULL\n",
+        "            ELSE CAST(u.usage_quantity AS DOUBLE) * CAST(lp.pricing.effective_list.default AS DOUBLE)\n",
+        "        END AS estimated_cost_usd,\n",
+        "        CASE WHEN u.sku_name <> 'GENIE_FREE_USAGE' AND lp.pricing.effective_list.default IS NULL THEN 1 ELSE 0 END AS missing_price,\n",
+        "        ROW_NUMBER() OVER (\n",
+        "            PARTITION BY u.account_id, u.record_id\n",
+        "            ORDER BY lp.price_start_time DESC NULLS LAST\n",
+        "        ) AS price_rank\n",
+        "    FROM system.billing.usage u\n",
+        "    LEFT JOIN system.billing.list_prices lp\n",
+        "      ON u.sku_name = lp.sku_name\n",
+        "     AND u.cloud = lp.cloud\n",
+        "     AND u.usage_unit = lp.usage_unit\n",
+        "     AND u.usage_end_time >= lp.price_start_time\n",
+        "     AND (lp.price_end_time IS NULL OR u.usage_end_time < lp.price_end_time)\n",
+        "    WHERE u.billing_origin_product = 'GENIE'\n",
+        "      AND u.usage_unit = 'DBU'\n",
+        "      AND u.usage_date >= DATE_SUB(CURRENT_DATE(), 89)\n",
+        "), base AS (\n",
+        "    SELECT * FROM priced WHERE price_rank = 1\n",
+        ")\n",
+        "\n",
+        "SELECT\n",
+        "    user_identity,\n",
+        "    ROUND(SUM(total_dbus), 2) AS total_dbus,\n",
+        "    ROUND(SUM(billed_dbus), 2) AS billed_dbus,\n",
+        "    ROUND(SUM(COALESCE(estimated_cost_usd, 0D)), 2) AS estimated_cost_usd,\n",
+        "    COUNT(DISTINCT usage_date) AS active_days_30d,\n",
+        "    COUNT(DISTINCT genie_product) AS products_used,\n",
+        "    MAX(usage_date) AS last_usage_date\n",
+        "FROM base\n",
+        "WHERE usage_date >= DATE_SUB(CURRENT_DATE(), 29)\n",
+        "GROUP BY user_identity\n",
+        "ORDER BY estimated_cost_usd DESC, billed_dbus DESC, total_dbus DESC\n",
+        "LIMIT 25\n"
+      ]
+    },
+    {
+      "name": "attention_watchlist",
+      "displayName": "Attention Watchlist",
+      "queryLines": [
+        "WITH priced AS (\n",
+        "    SELECT\n",
+        "        u.account_id,\n",
+        "        CAST(u.workspace_id AS STRING) AS workspace_id,\n",
+        "        u.record_id,\n",
+        "        u.usage_date,\n",
+        "        u.usage_end_time,\n",
+        "        LOWER(COALESCE(u.identity_metadata.run_as, 'unattributed')) AS user_identity,\n",
+        "        COALESCE(u.usage_metadata.genie.surface, 'UNKNOWN') AS genie_product,\n",
+        "        u.sku_name,\n",
+        "        CAST(u.usage_quantity AS DOUBLE) AS total_dbus,\n",
+        "        CASE WHEN u.sku_name = 'GENIE_FREE_USAGE' THEN CAST(u.usage_quantity AS DOUBLE) ELSE 0D END AS free_dbus,\n",
+        "        CASE WHEN u.sku_name <> 'GENIE_FREE_USAGE' THEN CAST(u.usage_quantity AS DOUBLE) ELSE 0D END AS billed_dbus,\n",
+        "        CASE\n",
+        "            WHEN u.sku_name = 'GENIE_FREE_USAGE' THEN 0D\n",
+        "            WHEN lp.pricing.effective_list.default IS NULL THEN NULL\n",
+        "            ELSE CAST(u.usage_quantity AS DOUBLE) * CAST(lp.pricing.effective_list.default AS DOUBLE)\n",
+        "        END AS estimated_cost_usd,\n",
+        "        CASE WHEN u.sku_name <> 'GENIE_FREE_USAGE' AND lp.pricing.effective_list.default IS NULL THEN 1 ELSE 0 END AS missing_price,\n",
+        "        ROW_NUMBER() OVER (\n",
+        "            PARTITION BY u.account_id, u.record_id\n",
+        "            ORDER BY lp.price_start_time DESC NULLS LAST\n",
+        "        ) AS price_rank\n",
+        "    FROM system.billing.usage u\n",
+        "    LEFT JOIN system.billing.list_prices lp\n",
+        "      ON u.sku_name = lp.sku_name\n",
+        "     AND u.cloud = lp.cloud\n",
+        "     AND u.usage_unit = lp.usage_unit\n",
+        "     AND u.usage_end_time >= lp.price_start_time\n",
+        "     AND (lp.price_end_time IS NULL OR u.usage_end_time < lp.price_end_time)\n",
+        "    WHERE u.billing_origin_product = 'GENIE'\n",
+        "      AND u.usage_unit = 'DBU'\n",
+        "      AND u.usage_date >= DATE_SUB(CURRENT_DATE(), 89)\n",
+        "), base AS (\n",
+        "    SELECT * FROM priced WHERE price_rank = 1\n",
+        ")\n",
+        "\n",
+        ", user_30d AS (\n",
+        "    SELECT\n",
+        "        user_identity,\n",
+        "        ROUND(SUM(total_dbus), 2) AS total_dbus_30d,\n",
+        "        ROUND(SUM(billed_dbus), 2) AS billed_dbus_30d,\n",
+        "        ROUND(SUM(COALESCE(estimated_cost_usd, 0D)), 2) AS estimated_cost_usd_30d,\n",
+        "        COUNT(DISTINCT usage_date) AS active_days_30d,\n",
+        "        MAX(usage_date) AS last_usage_date\n",
+        "    FROM base\n",
+        "    WHERE usage_date >= DATE_SUB(CURRENT_DATE(), 29)\n",
+        "    GROUP BY user_identity\n",
+        "), recent_vs_prior AS (\n",
+        "    SELECT\n",
+        "        user_identity,\n",
+        "        ROUND(SUM(CASE WHEN usage_date >= DATE_SUB(CURRENT_DATE(), 6) THEN total_dbus ELSE 0 END), 2) AS last_7d_dbus,\n",
+        "        ROUND(SUM(CASE WHEN usage_date BETWEEN DATE_SUB(CURRENT_DATE(), 34) AND DATE_SUB(CURRENT_DATE(), 7) THEN total_dbus ELSE 0 END), 2) AS previous_28d_dbus\n",
+        "    FROM base\n",
+        "    WHERE usage_date >= DATE_SUB(CURRENT_DATE(), 34)\n",
+        "    GROUP BY user_identity\n",
+        "), ranked AS (\n",
+        "    SELECT\n",
+        "        u.user_identity,\n",
+        "        u.total_dbus_30d,\n",
+        "        u.billed_dbus_30d,\n",
+        "        u.estimated_cost_usd_30d,\n",
+        "        u.active_days_30d,\n",
+        "        u.last_usage_date,\n",
+        "        r.last_7d_dbus,\n",
+        "        r.previous_28d_dbus,\n",
+        "        CASE WHEN COALESCE(r.previous_28d_dbus, 0D) = 0D THEN NULL\n",
+        "             ELSE ROUND((r.last_7d_dbus / 7D) / (r.previous_28d_dbus / 28D), 2) END AS rate_ratio,\n",
+        "        ROW_NUMBER() OVER (ORDER BY u.estimated_cost_usd_30d DESC, u.billed_dbus_30d DESC, u.total_dbus_30d DESC) AS cost_rank\n",
+        "    FROM user_30d u\n",
+        "    LEFT JOIN recent_vs_prior r ON u.user_identity = r.user_identity\n",
+        ")\n",
+        "SELECT\n",
+        "    user_identity,\n",
+        "    CASE\n",
+        "        WHEN cost_rank <= 10 THEN 'TOP_COST_OR_USAGE'\n",
+        "        WHEN COALESCE(last_7d_dbus, 0D) >= 15D AND COALESCE(rate_ratio, 0D) >= 3D THEN 'USAGE_SPIKE'\n",
+        "        WHEN COALESCE(last_7d_dbus, 0D) > 0D AND COALESCE(previous_28d_dbus, 0D) = 0D THEN 'NEW_ACTIVITY'\n",
+        "        ELSE 'BASELINE'\n",
+        "    END AS attention_type,\n",
+        "    ROUND(estimated_cost_usd_30d, 2) AS estimated_cost_usd_30d,\n",
+        "    billed_dbus_30d,\n",
+        "    total_dbus_30d,\n",
+        "    active_days_30d,\n",
+        "    last_7d_dbus,\n",
+        "    previous_28d_dbus,\n",
+        "    rate_ratio,\n",
+        "    last_usage_date\n",
+        "FROM ranked\n",
+        "ORDER BY\n",
+        "    CASE\n",
+        "        WHEN cost_rank <= 10 THEN 1\n",
+        "        WHEN COALESCE(last_7d_dbus, 0D) >= 15D AND COALESCE(rate_ratio, 0D) >= 3D THEN 2\n",
+        "        WHEN COALESCE(last_7d_dbus, 0D) > 0D AND COALESCE(previous_28d_dbus, 0D) = 0D THEN 3\n",
+        "        ELSE 4\n",
+        "    END,\n",
+        "    estimated_cost_usd_30d DESC,\n",
+        "    billed_dbus_30d DESC,\n",
+        "    total_dbus_30d DESC\n",
+        "LIMIT 25\n"
+      ]
+    },
+    {
+      "name": "price_quality",
+      "displayName": "Price Quality",
+      "queryLines": [
+        "WITH priced AS (\n",
+        "    SELECT\n",
+        "        u.account_id,\n",
+        "        CAST(u.workspace_id AS STRING) AS workspace_id,\n",
+        "        u.record_id,\n",
+        "        u.usage_date,\n",
+        "        u.usage_end_time,\n",
+        "        LOWER(COALESCE(u.identity_metadata.run_as, 'unattributed')) AS user_identity,\n",
+        "        COALESCE(u.usage_metadata.genie.surface, 'UNKNOWN') AS genie_product,\n",
+        "        u.sku_name,\n",
+        "        CAST(u.usage_quantity AS DOUBLE) AS total_dbus,\n",
+        "        CASE WHEN u.sku_name = 'GENIE_FREE_USAGE' THEN CAST(u.usage_quantity AS DOUBLE) ELSE 0D END AS free_dbus,\n",
+        "        CASE WHEN u.sku_name <> 'GENIE_FREE_USAGE' THEN CAST(u.usage_quantity AS DOUBLE) ELSE 0D END AS billed_dbus,\n",
+        "        CASE\n",
+        "            WHEN u.sku_name = 'GENIE_FREE_USAGE' THEN 0D\n",
+        "            WHEN lp.pricing.effective_list.default IS NULL THEN NULL\n",
+        "            ELSE CAST(u.usage_quantity AS DOUBLE) * CAST(lp.pricing.effective_list.default AS DOUBLE)\n",
+        "        END AS estimated_cost_usd,\n",
+        "        CASE WHEN u.sku_name <> 'GENIE_FREE_USAGE' AND lp.pricing.effective_list.default IS NULL THEN 1 ELSE 0 END AS missing_price,\n",
+        "        ROW_NUMBER() OVER (\n",
+        "            PARTITION BY u.account_id, u.record_id\n",
+        "            ORDER BY lp.price_start_time DESC NULLS LAST\n",
+        "        ) AS price_rank\n",
+        "    FROM system.billing.usage u\n",
+        "    LEFT JOIN system.billing.list_prices lp\n",
+        "      ON u.sku_name = lp.sku_name\n",
+        "     AND u.cloud = lp.cloud\n",
+        "     AND u.usage_unit = lp.usage_unit\n",
+        "     AND u.usage_end_time >= lp.price_start_time\n",
+        "     AND (lp.price_end_time IS NULL OR u.usage_end_time < lp.price_end_time)\n",
+        "    WHERE u.billing_origin_product = 'GENIE'\n",
+        "      AND u.usage_unit = 'DBU'\n",
+        "      AND u.usage_date >= DATE_SUB(CURRENT_DATE(), 89)\n",
+        "), base AS (\n",
+        "    SELECT * FROM priced WHERE price_rank = 1\n",
+        ")\n",
+        "\n",
+        "SELECT\n",
+        "    account_id,\n",
+        "    workspace_id,\n",
+        "    COUNT(*) AS usage_rows_30d,\n",
+        "    COUNT(DISTINCT user_identity) AS users_30d,\n",
+        "    ROUND(SUM(total_dbus), 2) AS total_dbus_30d,\n",
+        "    ROUND(SUM(billed_dbus), 2) AS billed_dbus_30d,\n",
+        "    ROUND(SUM(COALESCE(estimated_cost_usd, 0D)), 2) AS estimated_cost_usd_30d,\n",
+        "    SUM(missing_price) AS unpriced_paid_rows_30d,\n",
+        "    MAX(usage_date) AS latest_usage_date\n",
+        "FROM base\n",
+        "WHERE usage_date >= DATE_SUB(CURRENT_DATE(), 29)\n",
+        "GROUP BY account_id, workspace_id\n",
+        "ORDER BY estimated_cost_usd_30d DESC, billed_dbus_30d DESC\n"
+      ]
+    }
+  ],
+  "pages": [
+    {
+      "name": "genie_command_center",
+      "displayName": "Genie Command Center",
+      "layout": [
+        {
+          "widget": {
+            "name": "intro",
+            "multilineTextboxSpec": {
+              "lines": [
+                "## IFBI Genie Command Center\n",
+                "One page. Simpler structure. Estimated USD uses Databricks list prices. SQL warehouse cost is separate.\n"
+              ]
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 0,
+            "width": 12,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "kpi_active_users_30d",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "summary_kpis",
+                  "fields": [
+                    {
+                      "name": "active_users_30d",
+                      "expression": "`active_users_30d`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "frame": {
+                "title": "Active Users",
+                "showTitle": true
+              },
+              "encodings": {
+                "value": {
+                  "fieldName": "active_users_30d",
+                  "displayName": "Active Users"
+                }
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 2,
+            "width": 2,
+            "height": 4
+          }
+        },
+        {
+          "widget": {
+            "name": "kpi_total_dbus_30d",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "summary_kpis",
+                  "fields": [
+                    {
+                      "name": "total_dbus_30d",
+                      "expression": "`total_dbus_30d`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "frame": {
+                "title": "Total DBUs",
+                "showTitle": true
+              },
+              "encodings": {
+                "value": {
+                  "fieldName": "total_dbus_30d",
+                  "displayName": "Total DBUs"
+                }
+              }
+            }
+          },
+          "position": {
+            "x": 2,
+            "y": 2,
+            "width": 2,
+            "height": 4
+          }
+        },
+        {
+          "widget": {
+            "name": "kpi_billed_dbus_30d",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "summary_kpis",
+                  "fields": [
+                    {
+                      "name": "billed_dbus_30d",
+                      "expression": "`billed_dbus_30d`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "frame": {
+                "title": "Billable DBUs",
+                "showTitle": true
+              },
+              "encodings": {
+                "value": {
+                  "fieldName": "billed_dbus_30d",
+                  "displayName": "Billable DBUs"
+                }
+              }
+            }
+          },
+          "position": {
+            "x": 4,
+            "y": 2,
+            "width": 2,
+            "height": 4
+          }
+        },
+        {
+          "widget": {
+            "name": "kpi_estimated_cost_usd_30d",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "summary_kpis",
+                  "fields": [
+                    {
+                      "name": "estimated_cost_usd_30d",
+                      "expression": "`estimated_cost_usd_30d`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "frame": {
+                "title": "Estimated USD",
+                "showTitle": true
+              },
+              "encodings": {
+                "value": {
+                  "fieldName": "estimated_cost_usd_30d",
+                  "displayName": "Estimated USD"
+                }
+              }
+            }
+          },
+          "position": {
+            "x": 6,
+            "y": 2,
+            "width": 2,
+            "height": 4
+          }
+        },
+        {
+          "widget": {
+            "name": "kpi_projected_month_end_cost_usd",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "summary_kpis",
+                  "fields": [
+                    {
+                      "name": "projected_month_end_cost_usd",
+                      "expression": "`projected_month_end_cost_usd`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "frame": {
+                "title": "Projected Month End USD",
+                "showTitle": true
+              },
+              "encodings": {
+                "value": {
+                  "fieldName": "projected_month_end_cost_usd",
+                  "displayName": "Projected Month End USD"
+                }
+              }
+            }
+          },
+          "position": {
+            "x": 8,
+            "y": 2,
+            "width": 2,
+            "height": 4
+          }
+        },
+        {
+          "widget": {
+            "name": "kpi_top5_cost_share_pct",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "summary_kpis",
+                  "fields": [
+                    {
+                      "name": "top5_cost_share_pct",
+                      "expression": "`top5_cost_share_pct`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "frame": {
+                "title": "Top 5 Cost Share Pct",
+                "showTitle": true
+              },
+              "encodings": {
+                "value": {
+                  "fieldName": "top5_cost_share_pct",
+                  "displayName": "Top 5 Cost Share Pct"
+                }
+              }
+            }
+          },
+          "position": {
+            "x": 10,
+            "y": 2,
+            "width": 2,
+            "height": 4
+          }
+        },
+        {
+          "widget": {
+            "name": "daily_cost",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "daily_cost_trend",
+                  "fields": [
+                    {
+                      "name": "day",
+                      "expression": "`day`"
+                    },
+                    {
+                      "name": "estimated_cost_usd",
+                      "expression": "`estimated_cost_usd`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "line",
+              "frame": {
+                "title": "Daily Estimated Cost USD",
+                "showTitle": true
+              },
+              "encodings": {
+                "x": {
+                  "fieldName": "day",
+                  "scale": {
+                    "type": "temporal"
+                  },
+                  "displayName": "Day"
+                },
+                "y": {
+                  "fieldName": "estimated_cost_usd",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "displayName": "Estimated Cost Usd"
+                }
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 6,
+            "width": 6,
+            "height": 6
+          }
+        },
+        {
+          "widget": {
+            "name": "product_cost",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "product_summary",
+                  "fields": [
+                    {
+                      "name": "genie_product",
+                      "expression": "`genie_product`"
+                    },
+                    {
+                      "name": "estimated_cost_usd",
+                      "expression": "`estimated_cost_usd`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "bar",
+              "frame": {
+                "title": "Estimated Cost by Product",
+                "showTitle": true
+              },
+              "encodings": {
+                "x": {
+                  "fieldName": "genie_product",
+                  "scale": {
+                    "type": "categorical"
+                  },
+                  "displayName": "Genie Product"
+                },
+                "y": {
+                  "fieldName": "estimated_cost_usd",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "displayName": "Estimated Cost Usd"
+                }
+              }
+            }
+          },
+          "position": {
+            "x": 6,
+            "y": 6,
+            "width": 3,
+            "height": 6
+          }
+        },
+        {
+          "widget": {
+            "name": "workspace_cost",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "workspace_summary",
+                  "fields": [
+                    {
+                      "name": "workspace_id",
+                      "expression": "`workspace_id`"
+                    },
+                    {
+                      "name": "estimated_cost_usd",
+                      "expression": "`estimated_cost_usd`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "bar",
+              "frame": {
+                "title": "Estimated Cost by Workspace",
+                "showTitle": true
+              },
+              "encodings": {
+                "x": {
+                  "fieldName": "workspace_id",
+                  "scale": {
+                    "type": "categorical"
+                  },
+                  "displayName": "Workspace Id"
+                },
+                "y": {
+                  "fieldName": "estimated_cost_usd",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "displayName": "Estimated Cost Usd"
+                }
+              }
+            }
+          },
+          "position": {
+            "x": 9,
+            "y": 6,
+            "width": 3,
+            "height": 6
+          }
+        },
+        {
+          "widget": {
+            "name": "top_users",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "top_users_cost",
+                  "fields": [
+                    {
+                      "name": "user_identity",
+                      "expression": "`user_identity`"
+                    },
+                    {
+                      "name": "estimated_cost_usd",
+                      "expression": "`estimated_cost_usd`"
+                    },
+                    {
+                      "name": "billed_dbus",
+                      "expression": "`billed_dbus`"
+                    },
+                    {
+                      "name": "total_dbus",
+                      "expression": "`total_dbus`"
+                    },
+                    {
+                      "name": "active_days_30d",
+                      "expression": "`active_days_30d`"
+                    },
+                    {
+                      "name": "last_usage_date",
+                      "expression": "`last_usage_date`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "table",
+              "frame": {
+                "title": "Top Users by Estimated Cost",
+                "showTitle": true
+              },
+              "rowsPerPage": 12,
+              "encodings": {
+                "columns": [
+                  {
+                    "fieldName": "user_identity",
+                    "displayName": "User Identity"
+                  },
+                  {
+                    "fieldName": "estimated_cost_usd",
+                    "displayName": "Estimated Cost Usd"
+                  },
+                  {
+                    "fieldName": "billed_dbus",
+                    "displayName": "Billed Dbus"
+                  },
+                  {
+                    "fieldName": "total_dbus",
+                    "displayName": "Total Dbus"
+                  },
+                  {
+                    "fieldName": "active_days_30d",
+                    "displayName": "Active Days 30D"
+                  },
+                  {
+                    "fieldName": "last_usage_date",
+                    "displayName": "Last Usage Date"
+                  }
+                ]
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 12,
+            "width": 6,
+            "height": 10
+          }
+        },
+        {
+          "widget": {
+            "name": "watchlist",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "attention_watchlist",
+                  "fields": [
+                    {
+                      "name": "user_identity",
+                      "expression": "`user_identity`"
+                    },
+                    {
+                      "name": "attention_type",
+                      "expression": "`attention_type`"
+                    },
+                    {
+                      "name": "estimated_cost_usd_30d",
+                      "expression": "`estimated_cost_usd_30d`"
+                    },
+                    {
+                      "name": "billed_dbus_30d",
+                      "expression": "`billed_dbus_30d`"
+                    },
+                    {
+                      "name": "last_7d_dbus",
+                      "expression": "`last_7d_dbus`"
+                    },
+                    {
+                      "name": "rate_ratio",
+                      "expression": "`rate_ratio`"
+                    },
+                    {
+                      "name": "last_usage_date",
+                      "expression": "`last_usage_date`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "table",
+              "frame": {
+                "title": "Priority Watchlist",
+                "showTitle": true
+              },
+              "rowsPerPage": 12,
+              "encodings": {
+                "columns": [
+                  {
+                    "fieldName": "user_identity",
+                    "displayName": "User Identity"
+                  },
+                  {
+                    "fieldName": "attention_type",
+                    "displayName": "Attention Type"
+                  },
+                  {
+                    "fieldName": "estimated_cost_usd_30d",
+                    "displayName": "Estimated Cost Usd 30D"
+                  },
+                  {
+                    "fieldName": "billed_dbus_30d",
+                    "displayName": "Billed Dbus 30D"
+                  },
+                  {
+                    "fieldName": "last_7d_dbus",
+                    "displayName": "Last 7D Dbus"
+                  },
+                  {
+                    "fieldName": "rate_ratio",
+                    "displayName": "Rate Ratio"
+                  },
+                  {
+                    "fieldName": "last_usage_date",
+                    "displayName": "Last Usage Date"
+                  }
+                ]
+              }
+            }
+          },
+          "position": {
+            "x": 6,
+            "y": 12,
+            "width": 6,
+            "height": 10
+          }
+        },
+        {
+          "widget": {
+            "name": "coverage",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "price_quality",
+                  "fields": [
+                    {
+                      "name": "account_id",
+                      "expression": "`account_id`"
+                    },
+                    {
+                      "name": "workspace_id",
+                      "expression": "`workspace_id`"
+                    },
+                    {
+                      "name": "users_30d",
+                      "expression": "`users_30d`"
+                    },
+                    {
+                      "name": "estimated_cost_usd_30d",
+                      "expression": "`estimated_cost_usd_30d`"
+                    },
+                    {
+                      "name": "unpriced_paid_rows_30d",
+                      "expression": "`unpriced_paid_rows_30d`"
+                    },
+                    {
+                      "name": "latest_usage_date",
+                      "expression": "`latest_usage_date`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "table",
+              "frame": {
+                "title": "Coverage and Price Quality",
+                "showTitle": true
+              },
+              "rowsPerPage": 10,
+              "encodings": {
+                "columns": [
+                  {
+                    "fieldName": "account_id",
+                    "displayName": "Account Id"
+                  },
+                  {
+                    "fieldName": "workspace_id",
+                    "displayName": "Workspace Id"
+                  },
+                  {
+                    "fieldName": "users_30d",
+                    "displayName": "Users 30D"
+                  },
+                  {
+                    "fieldName": "estimated_cost_usd_30d",
+                    "displayName": "Estimated Cost Usd 30D"
+                  },
+                  {
+                    "fieldName": "unpriced_paid_rows_30d",
+                    "displayName": "Unpriced Paid Rows 30D"
+                  },
+                  {
+                    "fieldName": "latest_usage_date",
+                    "displayName": "Latest Usage Date"
+                  }
+                ]
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 22,
+            "width": 12,
+            "height": 5
+          }
+        }
+      ]
+    }
+  ],
+  "uiSettings": {
+    "theme": {
+      "canvasBackgroundColor": {
+        "light": "#FFFFFF",
+        "dark": "#0B1020"
+      },
+      "widgetBackgroundColor": {
+        "light": "#FFFFFF",
+        "dark": "#121A2B"
+      },
+      "widgetBorderColor": {
+        "light": "#E5E7EB",
+        "dark": "#23304A"
+      },
+      "fontColor": {
+        "light": "#111827",
+        "dark": "#EAF2FF"
+      },
+      "selectionColor": {
+        "light": "#2563EB",
+        "dark": "#7C5CFC"
+      },
+      "visualizationColors": [
+        "#7C5CFC",
+        "#22D3EE",
+        "#34D399",
+        "#F59E0B",
+        "#FB7185",
+        "#60A5FA",
+        "#A78BFA"
+      ],
+      "widgetHeaderAlignment": "LEFT"
+    },
+    "applyModeEnabled": false
+  }
+}
