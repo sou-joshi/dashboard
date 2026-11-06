@@ -1,0 +1,1069 @@
+{
+  "datasets": [
+    {
+      "name": "usage_kpis",
+      "displayName": "Usage Kpis",
+      "queryLines": [
+        "WITH usage_base AS (\n",
+        "  SELECT\n",
+        "    u.account_id,\n",
+        "    CAST(u.workspace_id AS STRING) AS workspace_id,\n",
+        "    u.usage_date,\n",
+        "    LOWER(COALESCE(u.identity_metadata.run_as, 'unattributed')) AS user_identity,\n",
+        "    COALESCE(u.usage_metadata.genie.surface, 'UNKNOWN') AS genie_product,\n",
+        "    u.sku_name,\n",
+        "    CAST(u.usage_quantity AS DOUBLE) AS total_dbus,\n",
+        "    CASE WHEN u.sku_name = 'GENIE_FREE_USAGE' THEN CAST(u.usage_quantity AS DOUBLE) ELSE 0D END AS free_dbus,\n",
+        "    CASE WHEN u.sku_name <> 'GENIE_FREE_USAGE' THEN CAST(u.usage_quantity AS DOUBLE) ELSE 0D END AS billed_dbus\n",
+        "  FROM system.billing.usage u\n",
+        "  WHERE u.billing_origin_product = 'GENIE'\n",
+        "    AND u.usage_unit = 'DBU'\n",
+        "    AND u.usage_date >= DATE_SUB(CURRENT_DATE(), 89)\n",
+        ")\n",
+        "SELECT COUNT(DISTINCT user_identity) AS active_users_30d,\n",
+        " ROUND(SUM(total_dbus),2) AS total_dbus_30d,\n",
+        " ROUND(SUM(free_dbus),2) AS free_dbus_30d,\n",
+        " ROUND(SUM(billed_dbus),2) AS billed_dbus_30d\n",
+        " FROM usage_base WHERE usage_date >= DATE_SUB(CURRENT_DATE(), 29)"
+      ]
+    },
+    {
+      "name": "daily_usage",
+      "displayName": "Daily Usage",
+      "queryLines": [
+        "WITH usage_base AS (\n",
+        "  SELECT\n",
+        "    u.account_id,\n",
+        "    CAST(u.workspace_id AS STRING) AS workspace_id,\n",
+        "    u.usage_date,\n",
+        "    LOWER(COALESCE(u.identity_metadata.run_as, 'unattributed')) AS user_identity,\n",
+        "    COALESCE(u.usage_metadata.genie.surface, 'UNKNOWN') AS genie_product,\n",
+        "    u.sku_name,\n",
+        "    CAST(u.usage_quantity AS DOUBLE) AS total_dbus,\n",
+        "    CASE WHEN u.sku_name = 'GENIE_FREE_USAGE' THEN CAST(u.usage_quantity AS DOUBLE) ELSE 0D END AS free_dbus,\n",
+        "    CASE WHEN u.sku_name <> 'GENIE_FREE_USAGE' THEN CAST(u.usage_quantity AS DOUBLE) ELSE 0D END AS billed_dbus\n",
+        "  FROM system.billing.usage u\n",
+        "  WHERE u.billing_origin_product = 'GENIE'\n",
+        "    AND u.usage_unit = 'DBU'\n",
+        "    AND u.usage_date >= DATE_SUB(CURRENT_DATE(), 89)\n",
+        ")\n",
+        "SELECT usage_date AS day,\n",
+        " ROUND(SUM(total_dbus),2) AS total_dbus,\n",
+        " ROUND(SUM(free_dbus),2) AS free_dbus,\n",
+        " ROUND(SUM(billed_dbus),2) AS billed_dbus\n",
+        " FROM usage_base WHERE usage_date >= DATE_SUB(CURRENT_DATE(),29)\n",
+        " GROUP BY usage_date ORDER BY day"
+      ]
+    },
+    {
+      "name": "product_usage",
+      "displayName": "Product Usage",
+      "queryLines": [
+        "WITH usage_base AS (\n",
+        "  SELECT\n",
+        "    u.account_id,\n",
+        "    CAST(u.workspace_id AS STRING) AS workspace_id,\n",
+        "    u.usage_date,\n",
+        "    LOWER(COALESCE(u.identity_metadata.run_as, 'unattributed')) AS user_identity,\n",
+        "    COALESCE(u.usage_metadata.genie.surface, 'UNKNOWN') AS genie_product,\n",
+        "    u.sku_name,\n",
+        "    CAST(u.usage_quantity AS DOUBLE) AS total_dbus,\n",
+        "    CASE WHEN u.sku_name = 'GENIE_FREE_USAGE' THEN CAST(u.usage_quantity AS DOUBLE) ELSE 0D END AS free_dbus,\n",
+        "    CASE WHEN u.sku_name <> 'GENIE_FREE_USAGE' THEN CAST(u.usage_quantity AS DOUBLE) ELSE 0D END AS billed_dbus\n",
+        "  FROM system.billing.usage u\n",
+        "  WHERE u.billing_origin_product = 'GENIE'\n",
+        "    AND u.usage_unit = 'DBU'\n",
+        "    AND u.usage_date >= DATE_SUB(CURRENT_DATE(), 89)\n",
+        ")\n",
+        ", products AS (\n",
+        " SELECT 'GENIE_CODE' AS genie_product\n",
+        " UNION ALL SELECT 'GENIE_ONE'\n",
+        " UNION ALL SELECT 'GENIE_AGENTS'\n",
+        "), aggregates AS (\n",
+        " SELECT genie_product,\n",
+        " COUNT(DISTINCT user_identity) AS active_users,\n",
+        " ROUND(SUM(total_dbus),2) AS total_dbus,\n",
+        " ROUND(SUM(free_dbus),2) AS free_dbus,\n",
+        " ROUND(SUM(billed_dbus),2) AS billed_dbus\n",
+        " FROM usage_base WHERE usage_date >= DATE_SUB(CURRENT_DATE(),29)\n",
+        " GROUP BY genie_product\n",
+        ")\n",
+        "SELECT p.genie_product,\n",
+        " COALESCE(a.active_users,0) AS active_users,\n",
+        " COALESCE(a.total_dbus,0D) AS total_dbus,\n",
+        " COALESCE(a.free_dbus,0D) AS free_dbus,\n",
+        " COALESCE(a.billed_dbus,0D) AS billed_dbus\n",
+        "FROM products p LEFT JOIN aggregates a ON p.genie_product=a.genie_product\n",
+        "ORDER BY total_dbus DESC"
+      ]
+    },
+    {
+      "name": "top_users",
+      "displayName": "Top Users",
+      "queryLines": [
+        "WITH usage_base AS (\n",
+        "  SELECT\n",
+        "    u.account_id,\n",
+        "    CAST(u.workspace_id AS STRING) AS workspace_id,\n",
+        "    u.usage_date,\n",
+        "    LOWER(COALESCE(u.identity_metadata.run_as, 'unattributed')) AS user_identity,\n",
+        "    COALESCE(u.usage_metadata.genie.surface, 'UNKNOWN') AS genie_product,\n",
+        "    u.sku_name,\n",
+        "    CAST(u.usage_quantity AS DOUBLE) AS total_dbus,\n",
+        "    CASE WHEN u.sku_name = 'GENIE_FREE_USAGE' THEN CAST(u.usage_quantity AS DOUBLE) ELSE 0D END AS free_dbus,\n",
+        "    CASE WHEN u.sku_name <> 'GENIE_FREE_USAGE' THEN CAST(u.usage_quantity AS DOUBLE) ELSE 0D END AS billed_dbus\n",
+        "  FROM system.billing.usage u\n",
+        "  WHERE u.billing_origin_product = 'GENIE'\n",
+        "    AND u.usage_unit = 'DBU'\n",
+        "    AND u.usage_date >= DATE_SUB(CURRENT_DATE(), 89)\n",
+        ")\n",
+        "SELECT user_identity,\n",
+        " ROUND(SUM(total_dbus),2) AS total_dbus,\n",
+        " ROUND(SUM(free_dbus),2) AS free_dbus,\n",
+        " ROUND(SUM(billed_dbus),2) AS billed_dbus,\n",
+        " COUNT(DISTINCT usage_date) AS active_billing_days,\n",
+        " MAX(usage_date) AS last_usage_date\n",
+        " FROM usage_base WHERE usage_date >= DATE_SUB(CURRENT_DATE(),29)\n",
+        " GROUP BY user_identity\n",
+        " ORDER BY billed_dbus DESC, total_dbus DESC LIMIT 30"
+      ]
+    },
+    {
+      "name": "usage_watchlist",
+      "displayName": "Usage Watchlist",
+      "queryLines": [
+        "WITH usage_base AS (\n",
+        "  SELECT\n",
+        "    u.account_id,\n",
+        "    CAST(u.workspace_id AS STRING) AS workspace_id,\n",
+        "    u.usage_date,\n",
+        "    LOWER(COALESCE(u.identity_metadata.run_as, 'unattributed')) AS user_identity,\n",
+        "    COALESCE(u.usage_metadata.genie.surface, 'UNKNOWN') AS genie_product,\n",
+        "    u.sku_name,\n",
+        "    CAST(u.usage_quantity AS DOUBLE) AS total_dbus,\n",
+        "    CASE WHEN u.sku_name = 'GENIE_FREE_USAGE' THEN CAST(u.usage_quantity AS DOUBLE) ELSE 0D END AS free_dbus,\n",
+        "    CASE WHEN u.sku_name <> 'GENIE_FREE_USAGE' THEN CAST(u.usage_quantity AS DOUBLE) ELSE 0D END AS billed_dbus\n",
+        "  FROM system.billing.usage u\n",
+        "  WHERE u.billing_origin_product = 'GENIE'\n",
+        "    AND u.usage_unit = 'DBU'\n",
+        "    AND u.usage_date >= DATE_SUB(CURRENT_DATE(), 89)\n",
+        ")\n",
+        ", windowed AS (\n",
+        " SELECT user_identity,\n",
+        " SUM(CASE WHEN usage_date >= DATE_SUB(CURRENT_DATE(), 29) THEN total_dbus ELSE 0D END) AS total_dbus_30d,\n",
+        " SUM(CASE WHEN usage_date >= DATE_SUB(CURRENT_DATE(), 29) THEN billed_dbus ELSE 0D END) AS billed_dbus_30d,\n",
+        " SUM(CASE WHEN usage_date >= DATE_SUB(CURRENT_DATE(), 6) THEN total_dbus ELSE 0D END) AS dbus_7d,\n",
+        " SUM(CASE WHEN usage_date BETWEEN DATE_SUB(CURRENT_DATE(),34) AND DATE_SUB(CURRENT_DATE(),7) THEN total_dbus ELSE 0D END) AS dbus_prev_28d\n",
+        " FROM usage_base\n",
+        " WHERE usage_date >= DATE_SUB(CURRENT_DATE(),34)\n",
+        " GROUP BY user_identity\n",
+        "), ranked AS (\n",
+        " SELECT *, ROW_NUMBER() OVER (ORDER BY billed_dbus_30d DESC, total_dbus_30d DESC) AS usage_rank,\n",
+        " CASE WHEN dbus_prev_28d > 0D THEN ROUND((dbus_7d/7D)/(dbus_prev_28d/28D),2) ELSE NULL END AS rate_ratio\n",
+        " FROM windowed\n",
+        " WHERE total_dbus_30d > 0D\n",
+        ")\n",
+        "SELECT user_identity,\n",
+        " CASE WHEN usage_rank <= 10 THEN 'HIGH_CONSUMPTION'\n",
+        "      WHEN dbus_7d >= 15D AND COALESCE(rate_ratio,0D) >= 3D THEN 'RECENT_SPIKE'\n",
+        "      WHEN dbus_7d > 0D AND dbus_prev_28d = 0D THEN 'NEW_ACTIVITY'\n",
+        "      ELSE 'BASELINE' END AS review_type,\n",
+        " ROUND(total_dbus_30d,2) AS total_dbus_30d,\n",
+        " ROUND(billed_dbus_30d,2) AS billed_dbus_30d,\n",
+        " ROUND(dbus_7d,2) AS last_7d_dbus,\n",
+        " rate_ratio\n",
+        "FROM ranked\n",
+        "ORDER BY CASE WHEN usage_rank<=10 THEN 1\n",
+        "              WHEN dbus_7d>=15D AND COALESCE(rate_ratio,0D)>=3D THEN 2\n",
+        "              WHEN dbus_7d>0D AND dbus_prev_28d=0D THEN 3 ELSE 4 END,\n",
+        "         billed_dbus_30d DESC,total_dbus_30d DESC LIMIT 25"
+      ]
+    },
+    {
+      "name": "cost_kpis",
+      "displayName": "Cost Kpis",
+      "queryLines": [
+        "WITH matched AS (\n",
+        " SELECT\n",
+        "   u.account_id,\n",
+        "   u.record_id,\n",
+        "   u.usage_date,\n",
+        "   LOWER(COALESCE(u.identity_metadata.run_as, 'unattributed')) AS user_identity,\n",
+        "   COALESCE(u.usage_metadata.genie.surface, 'UNKNOWN') AS genie_product,\n",
+        "   u.sku_name,\n",
+        "   CAST(u.usage_quantity AS DOUBLE) AS total_dbus,\n",
+        "   CASE WHEN u.sku_name <> 'GENIE_FREE_USAGE' THEN CAST(u.usage_quantity AS DOUBLE) ELSE 0D END AS billed_dbus,\n",
+        "   CASE WHEN u.sku_name = 'GENIE_FREE_USAGE' THEN 0D\n",
+        "        WHEN lp.pricing.effective_list.default IS NULL THEN NULL\n",
+        "        ELSE CAST(u.usage_quantity AS DOUBLE) * CAST(lp.pricing.effective_list.default AS DOUBLE)\n",
+        "   END AS estimated_usd,\n",
+        "   CASE WHEN u.sku_name <> 'GENIE_FREE_USAGE' AND lp.pricing.effective_list.default IS NULL THEN 1 ELSE 0 END AS missing_price,\n",
+        "   ROW_NUMBER() OVER (PARTITION BY u.account_id, u.record_id ORDER BY lp.price_start_time DESC NULLS LAST) AS rn\n",
+        " FROM system.billing.usage u\n",
+        " LEFT JOIN system.billing.list_prices lp\n",
+        "   ON u.sku_name = lp.sku_name\n",
+        "  AND u.cloud = lp.cloud\n",
+        "  AND u.usage_unit = lp.usage_unit\n",
+        "  AND u.usage_end_time >= lp.price_start_time\n",
+        "  AND (lp.price_end_time IS NULL OR u.usage_end_time < lp.price_end_time)\n",
+        " WHERE u.billing_origin_product = 'GENIE'\n",
+        "   AND u.usage_unit = 'DBU'\n",
+        "   AND u.usage_date >= DATE_SUB(CURRENT_DATE(), 89)\n",
+        "), priced AS (SELECT * FROM matched WHERE rn = 1)\n",
+        ", summary AS (\n",
+        " SELECT\n",
+        "   SUM(CASE WHEN usage_date >= DATE_SUB(CURRENT_DATE(),29) THEN missing_price ELSE 0 END) AS unpriced_paid_rows_30d,\n",
+        "   SUM(CASE WHEN usage_date >= DATE_SUB(CURRENT_DATE(),29) THEN estimated_usd ELSE 0D END) AS cost_30d,\n",
+        "   SUM(CASE WHEN usage_date >= DATE_TRUNC('MONTH', CURRENT_DATE()) THEN missing_price ELSE 0 END) AS unpriced_paid_rows_mtd,\n",
+        "   SUM(CASE WHEN usage_date >= DATE_TRUNC('MONTH', CURRENT_DATE()) THEN estimated_usd ELSE 0D END) AS cost_mtd\n",
+        " FROM priced\n",
+        "), user_cost AS (\n",
+        " SELECT user_identity, SUM(estimated_usd) AS cost_usd\n",
+        " FROM priced WHERE usage_date >= DATE_SUB(CURRENT_DATE(),29)\n",
+        " GROUP BY user_identity\n",
+        "), user_rank AS (\n",
+        " SELECT cost_usd, ROW_NUMBER() OVER (ORDER BY cost_usd DESC NULLS LAST) AS rnk\n",
+        " FROM user_cost\n",
+        "), concentration AS (\n",
+        " SELECT SUM(CASE WHEN rnk <= 5 THEN cost_usd ELSE 0D END) AS cost_top5,\n",
+        "        SUM(cost_usd) AS cost_all\n",
+        " FROM user_rank\n",
+        ")\n",
+        "SELECT\n",
+        " CASE WHEN unpriced_paid_rows_30d>0 THEN NULL ELSE ROUND(cost_30d,2) END AS estimated_cost_usd_30d,\n",
+        " CASE WHEN unpriced_paid_rows_mtd>0 THEN NULL ELSE ROUND(cost_mtd * DAY(LAST_DAY(CURRENT_DATE())) / GREATEST(DAY(CURRENT_DATE()),1),2) END AS projected_month_end_usd,\n",
+        " CASE WHEN unpriced_paid_rows_30d>0 THEN NULL ELSE ROUND(100D*cost_top5/NULLIF(cost_all,0D),1) END AS top5_cost_share_pct,\n",
+        " unpriced_paid_rows_30d\n",
+        "FROM summary CROSS JOIN concentration"
+      ]
+    },
+    {
+      "name": "cost_by_user",
+      "displayName": "Cost By User",
+      "queryLines": [
+        "WITH matched AS (\n",
+        " SELECT\n",
+        "   u.account_id,\n",
+        "   u.record_id,\n",
+        "   u.usage_date,\n",
+        "   LOWER(COALESCE(u.identity_metadata.run_as, 'unattributed')) AS user_identity,\n",
+        "   COALESCE(u.usage_metadata.genie.surface, 'UNKNOWN') AS genie_product,\n",
+        "   u.sku_name,\n",
+        "   CAST(u.usage_quantity AS DOUBLE) AS total_dbus,\n",
+        "   CASE WHEN u.sku_name <> 'GENIE_FREE_USAGE' THEN CAST(u.usage_quantity AS DOUBLE) ELSE 0D END AS billed_dbus,\n",
+        "   CASE WHEN u.sku_name = 'GENIE_FREE_USAGE' THEN 0D\n",
+        "        WHEN lp.pricing.effective_list.default IS NULL THEN NULL\n",
+        "        ELSE CAST(u.usage_quantity AS DOUBLE) * CAST(lp.pricing.effective_list.default AS DOUBLE)\n",
+        "   END AS estimated_usd,\n",
+        "   CASE WHEN u.sku_name <> 'GENIE_FREE_USAGE' AND lp.pricing.effective_list.default IS NULL THEN 1 ELSE 0 END AS missing_price,\n",
+        "   ROW_NUMBER() OVER (PARTITION BY u.account_id, u.record_id ORDER BY lp.price_start_time DESC NULLS LAST) AS rn\n",
+        " FROM system.billing.usage u\n",
+        " LEFT JOIN system.billing.list_prices lp\n",
+        "   ON u.sku_name = lp.sku_name\n",
+        "  AND u.cloud = lp.cloud\n",
+        "  AND u.usage_unit = lp.usage_unit\n",
+        "  AND u.usage_end_time >= lp.price_start_time\n",
+        "  AND (lp.price_end_time IS NULL OR u.usage_end_time < lp.price_end_time)\n",
+        " WHERE u.billing_origin_product = 'GENIE'\n",
+        "   AND u.usage_unit = 'DBU'\n",
+        "   AND u.usage_date >= DATE_SUB(CURRENT_DATE(), 89)\n",
+        "), priced AS (SELECT * FROM matched WHERE rn = 1)\n",
+        "SELECT user_identity,\n",
+        " ROUND(SUM(billed_dbus),2) AS billed_dbus,\n",
+        " CASE WHEN SUM(missing_price)>0 THEN NULL ELSE ROUND(SUM(estimated_usd),2) END AS estimated_cost_usd,\n",
+        " SUM(missing_price) AS unpriced_paid_rows\n",
+        "FROM priced\n",
+        "WHERE usage_date >= DATE_SUB(CURRENT_DATE(),29)\n",
+        "GROUP BY user_identity\n",
+        "ORDER BY billed_dbus DESC, estimated_cost_usd DESC NULLS LAST LIMIT 30"
+      ]
+    }
+  ],
+  "pages": [
+    {
+      "name": "genie_usage_cost",
+      "displayName": "Genie Usage and Cost",
+      "layout": [
+        {
+          "widget": {
+            "name": "header",
+            "multilineTextboxSpec": {
+              "lines": [
+                "## Genie Usage and Cost\n",
+                "Activity includes Genie Code, Genie One and Genie Agents. Free usage may have zero estimated USD. SQL warehouse cost is excluded.\n"
+              ]
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 0,
+            "width": 12,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "metric_active_users_30d",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "usage_kpis",
+                  "fields": [
+                    {
+                      "name": "active_users_30d",
+                      "expression": "`active_users_30d`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "frame": {
+                "showTitle": true,
+                "title": "Active Identities"
+              },
+              "encodings": {
+                "value": {
+                  "fieldName": "active_users_30d",
+                  "displayName": "Active Identities"
+                }
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 2,
+            "width": 2,
+            "height": 4
+          }
+        },
+        {
+          "widget": {
+            "name": "metric_total_dbus_30d",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "usage_kpis",
+                  "fields": [
+                    {
+                      "name": "total_dbus_30d",
+                      "expression": "`total_dbus_30d`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "frame": {
+                "showTitle": true,
+                "title": "Total DBUs"
+              },
+              "encodings": {
+                "value": {
+                  "fieldName": "total_dbus_30d",
+                  "displayName": "Total DBUs"
+                }
+              }
+            }
+          },
+          "position": {
+            "x": 2,
+            "y": 2,
+            "width": 2,
+            "height": 4
+          }
+        },
+        {
+          "widget": {
+            "name": "metric_free_dbus_30d",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "usage_kpis",
+                  "fields": [
+                    {
+                      "name": "free_dbus_30d",
+                      "expression": "`free_dbus_30d`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "frame": {
+                "showTitle": true,
+                "title": "Free DBUs"
+              },
+              "encodings": {
+                "value": {
+                  "fieldName": "free_dbus_30d",
+                  "displayName": "Free DBUs"
+                }
+              }
+            }
+          },
+          "position": {
+            "x": 4,
+            "y": 2,
+            "width": 2,
+            "height": 4
+          }
+        },
+        {
+          "widget": {
+            "name": "metric_billed_dbus_30d",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "usage_kpis",
+                  "fields": [
+                    {
+                      "name": "billed_dbus_30d",
+                      "expression": "`billed_dbus_30d`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "frame": {
+                "showTitle": true,
+                "title": "Billable DBUs"
+              },
+              "encodings": {
+                "value": {
+                  "fieldName": "billed_dbus_30d",
+                  "displayName": "Billable DBUs"
+                }
+              }
+            }
+          },
+          "position": {
+            "x": 6,
+            "y": 2,
+            "width": 2,
+            "height": 4
+          }
+        },
+        {
+          "widget": {
+            "name": "metric_estimated_cost_usd_30d",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "cost_kpis",
+                  "fields": [
+                    {
+                      "name": "estimated_cost_usd_30d",
+                      "expression": "`estimated_cost_usd_30d`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "frame": {
+                "showTitle": true,
+                "title": "Estimated USD"
+              },
+              "encodings": {
+                "value": {
+                  "fieldName": "estimated_cost_usd_30d",
+                  "displayName": "Estimated USD"
+                }
+              }
+            }
+          },
+          "position": {
+            "x": 8,
+            "y": 2,
+            "width": 2,
+            "height": 4
+          }
+        },
+        {
+          "widget": {
+            "name": "metric_projected_month_end_usd",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "cost_kpis",
+                  "fields": [
+                    {
+                      "name": "projected_month_end_usd",
+                      "expression": "`projected_month_end_usd`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "frame": {
+                "showTitle": true,
+                "title": "Projected Month-End USD"
+              },
+              "encodings": {
+                "value": {
+                  "fieldName": "projected_month_end_usd",
+                  "displayName": "Projected Month-End USD"
+                }
+              }
+            }
+          },
+          "position": {
+            "x": 10,
+            "y": 2,
+            "width": 2,
+            "height": 4
+          }
+        },
+        {
+          "widget": {
+            "name": "daily",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "daily_usage",
+                  "fields": [
+                    {
+                      "name": "day",
+                      "expression": "`day`"
+                    },
+                    {
+                      "name": "total_dbus",
+                      "expression": "`total_dbus`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "line",
+              "frame": {
+                "showTitle": true,
+                "title": "Daily Genie Consumption - DBUs"
+              },
+              "encodings": {
+                "x": {
+                  "fieldName": "day",
+                  "scale": {
+                    "type": "temporal"
+                  },
+                  "displayName": "Day"
+                },
+                "y": {
+                  "fieldName": "total_dbus",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "displayName": "Total Dbus"
+                }
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 6,
+            "width": 6,
+            "height": 6
+          }
+        },
+        {
+          "widget": {
+            "name": "products",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "product_usage",
+                  "fields": [
+                    {
+                      "name": "genie_product",
+                      "expression": "`genie_product`"
+                    },
+                    {
+                      "name": "total_dbus",
+                      "expression": "`total_dbus`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "bar",
+              "frame": {
+                "showTitle": true,
+                "title": "Usage by Genie Product - DBUs"
+              },
+              "encodings": {
+                "x": {
+                  "fieldName": "genie_product",
+                  "scale": {
+                    "type": "categorical"
+                  },
+                  "displayName": "Genie Product"
+                },
+                "y": {
+                  "fieldName": "total_dbus",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "displayName": "Total Dbus"
+                }
+              }
+            }
+          },
+          "position": {
+            "x": 6,
+            "y": 6,
+            "width": 6,
+            "height": 6
+          }
+        },
+        {
+          "widget": {
+            "name": "product_table",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "product_usage",
+                  "fields": [
+                    {
+                      "name": "genie_product",
+                      "expression": "`genie_product`"
+                    },
+                    {
+                      "name": "active_users",
+                      "expression": "`active_users`"
+                    },
+                    {
+                      "name": "total_dbus",
+                      "expression": "`total_dbus`"
+                    },
+                    {
+                      "name": "free_dbus",
+                      "expression": "`free_dbus`"
+                    },
+                    {
+                      "name": "billed_dbus",
+                      "expression": "`billed_dbus`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "table",
+              "frame": {
+                "showTitle": true,
+                "title": "All Three Products - Billing Breakdown"
+              },
+              "rowsPerPage": 12,
+              "encodings": {
+                "columns": [
+                  {
+                    "fieldName": "genie_product",
+                    "displayName": "Product"
+                  },
+                  {
+                    "fieldName": "active_users",
+                    "displayName": "Active Identities"
+                  },
+                  {
+                    "fieldName": "total_dbus",
+                    "displayName": "Total DBUs"
+                  },
+                  {
+                    "fieldName": "free_dbus",
+                    "displayName": "Free DBUs"
+                  },
+                  {
+                    "fieldName": "billed_dbus",
+                    "displayName": "Billable DBUs"
+                  }
+                ]
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 12,
+            "width": 12,
+            "height": 6
+          }
+        },
+        {
+          "widget": {
+            "name": "top_users",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "top_users",
+                  "fields": [
+                    {
+                      "name": "user_identity",
+                      "expression": "`user_identity`"
+                    },
+                    {
+                      "name": "total_dbus",
+                      "expression": "`total_dbus`"
+                    },
+                    {
+                      "name": "billed_dbus",
+                      "expression": "`billed_dbus`"
+                    },
+                    {
+                      "name": "active_billing_days",
+                      "expression": "`active_billing_days`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "table",
+              "frame": {
+                "showTitle": true,
+                "title": "Top Users by DBU Consumption"
+              },
+              "rowsPerPage": 12,
+              "encodings": {
+                "columns": [
+                  {
+                    "fieldName": "user_identity",
+                    "displayName": "Identity"
+                  },
+                  {
+                    "fieldName": "total_dbus",
+                    "displayName": "Total DBUs"
+                  },
+                  {
+                    "fieldName": "billed_dbus",
+                    "displayName": "Billable DBUs"
+                  },
+                  {
+                    "fieldName": "active_billing_days",
+                    "displayName": "Active Days"
+                  }
+                ]
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 18,
+            "width": 6,
+            "height": 10
+          }
+        },
+        {
+          "widget": {
+            "name": "watchlist",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "usage_watchlist",
+                  "fields": [
+                    {
+                      "name": "user_identity",
+                      "expression": "`user_identity`"
+                    },
+                    {
+                      "name": "review_type",
+                      "expression": "`review_type`"
+                    },
+                    {
+                      "name": "total_dbus_30d",
+                      "expression": "`total_dbus_30d`"
+                    },
+                    {
+                      "name": "billed_dbus_30d",
+                      "expression": "`billed_dbus_30d`"
+                    },
+                    {
+                      "name": "rate_ratio",
+                      "expression": "`rate_ratio`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "table",
+              "frame": {
+                "showTitle": true,
+                "title": "Governance Usage Review"
+              },
+              "rowsPerPage": 12,
+              "encodings": {
+                "columns": [
+                  {
+                    "fieldName": "user_identity",
+                    "displayName": "Identity"
+                  },
+                  {
+                    "fieldName": "review_type",
+                    "displayName": "Review Type"
+                  },
+                  {
+                    "fieldName": "total_dbus_30d",
+                    "displayName": "Total DBUs"
+                  },
+                  {
+                    "fieldName": "billed_dbus_30d",
+                    "displayName": "Billed DBUs"
+                  },
+                  {
+                    "fieldName": "rate_ratio",
+                    "displayName": "7D Rate Ratio"
+                  }
+                ]
+              }
+            }
+          },
+          "position": {
+            "x": 6,
+            "y": 18,
+            "width": 6,
+            "height": 10
+          }
+        },
+        {
+          "widget": {
+            "name": "cost_user",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "cost_by_user",
+                  "fields": [
+                    {
+                      "name": "user_identity",
+                      "expression": "`user_identity`"
+                    },
+                    {
+                      "name": "billed_dbus",
+                      "expression": "`billed_dbus`"
+                    },
+                    {
+                      "name": "estimated_cost_usd",
+                      "expression": "`estimated_cost_usd`"
+                    },
+                    {
+                      "name": "unpriced_paid_rows",
+                      "expression": "`unpriced_paid_rows`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "table",
+              "frame": {
+                "showTitle": true,
+                "title": "Estimated Cost by User - Price Validation"
+              },
+              "rowsPerPage": 12,
+              "encodings": {
+                "columns": [
+                  {
+                    "fieldName": "user_identity",
+                    "displayName": "Identity"
+                  },
+                  {
+                    "fieldName": "billed_dbus",
+                    "displayName": "Billable DBUs"
+                  },
+                  {
+                    "fieldName": "estimated_cost_usd",
+                    "displayName": "Estimated USD"
+                  },
+                  {
+                    "fieldName": "unpriced_paid_rows",
+                    "displayName": "Unpriced Rows"
+                  }
+                ]
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 28,
+            "width": 12,
+            "height": 7
+          }
+        },
+        {
+          "widget": {
+            "name": "metric_unpriced_paid_rows_30d",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "cost_kpis",
+                  "fields": [
+                    {
+                      "name": "unpriced_paid_rows_30d",
+                      "expression": "`unpriced_paid_rows_30d`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "frame": {
+                "showTitle": true,
+                "title": "Unpriced Paid Records"
+              },
+              "encodings": {
+                "value": {
+                  "fieldName": "unpriced_paid_rows_30d",
+                  "displayName": "Unpriced Paid Records"
+                }
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 35,
+            "width": 3,
+            "height": 4
+          }
+        },
+        {
+          "widget": {
+            "name": "metric_top5_cost_share_pct",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "cost_kpis",
+                  "fields": [
+                    {
+                      "name": "top5_cost_share_pct",
+                      "expression": "`top5_cost_share_pct`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "frame": {
+                "showTitle": true,
+                "title": "Top 5 Cost Share Pct"
+              },
+              "encodings": {
+                "value": {
+                  "fieldName": "top5_cost_share_pct",
+                  "displayName": "Top 5 Cost Share Pct"
+                }
+              }
+            }
+          },
+          "position": {
+            "x": 3,
+            "y": 35,
+            "width": 3,
+            "height": 4
+          }
+        },
+        {
+          "widget": {
+            "name": "footnote",
+            "multilineTextboxSpec": {
+              "lines": [
+                "Cost estimates use time-effective Databricks list prices; NULL cost indicates missing paid-SKU pricing. Usage panels query billing directly and remain available when pricing access is unavailable.\n"
+              ]
+            }
+          },
+          "position": {
+            "x": 6,
+            "y": 35,
+            "width": 6,
+            "height": 4
+          }
+        }
+      ]
+    }
+  ],
+  "uiSettings": {
+    "theme": {
+      "canvasBackgroundColor": {
+        "light": "#FFFFFF",
+        "dark": "#091120"
+      },
+      "widgetBackgroundColor": {
+        "light": "#FFFFFF",
+        "dark": "#111D2F"
+      },
+      "widgetBorderColor": {
+        "light": "#E1E7EE",
+        "dark": "#29384F"
+      },
+      "fontColor": {
+        "light": "#182238",
+        "dark": "#E8F1FF"
+      },
+      "selectionColor": {
+        "light": "#6B4EED",
+        "dark": "#9B83FF"
+      },
+      "visualizationColors": [
+        "#4AD5E8",
+        "#8E77FF",
+        "#39D9A7",
+        "#FEBB73",
+        "#74AFFF",
+        "#F38BAC"
+      ],
+      "widgetHeaderAlignment": "LEFT"
+    },
+    "applyModeEnabled": false
+  }
+}
