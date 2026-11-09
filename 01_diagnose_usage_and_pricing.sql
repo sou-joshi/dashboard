@@ -32,3 +32,38 @@ WHERE u.billing_origin_product = 'GENIE'
   AND u.usage_date >= DATE_SUB(CURRENT_DATE(), 29)
 GROUP BY u.sku_name, u.usage_unit
 ORDER BY billed_dbus DESC;
+
+
+
+-- Query for service principles
+
+SELECT
+    identity_metadata.run_as AS run_as_identity,
+    usage_metadata.genie.surface AS genie_product,
+    sku_name,
+
+    COUNT(*) AS billing_records,
+
+    ROUND(SUM(usage_quantity), 2) AS total_dbus,
+
+    ROUND(SUM(
+        CASE
+            WHEN sku_name <> 'GENIE_FREE_USAGE'
+            THEN usage_quantity
+            ELSE 0
+        END
+    ), 2) AS billed_dbus
+
+FROM system.billing.usage
+
+WHERE billing_origin_product = 'GENIE'
+  AND usage_unit = 'DBU'
+  AND usage_date >= DATE_TRUNC('MONTH', CURRENT_DATE())
+
+GROUP BY
+    identity_metadata.run_as,
+    usage_metadata.genie.surface,
+    sku_name
+
+ORDER BY billed_dbus DESC, total_dbus DESC;
+
