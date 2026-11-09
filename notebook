@@ -1,0 +1,24 @@
+
+from databricks.sdk import WorkspaceClient
+
+# Replace with the UUID from your Genie billing query
+target_id = "PASTE-UUID-HERE"
+
+w = WorkspaceClient()
+
+matches = [
+    sp
+    for sp in w.service_principals.list()
+    if (sp.application_id or "").lower() == target_id.lower()
+]
+
+if matches:
+    for sp in matches:
+        print("Confirmed: SERVICE PRINCIPAL")
+        print("Application ID:", sp.application_id)
+        print("Display Name:", sp.display_name)
+        print("Databricks ID:", sp.id)
+        print("Active:", sp.active)
+else:
+    print("Not found in the workspace service principal inventory.")
+    print("Check account-wide inventory before classifying.")
