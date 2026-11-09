@@ -67,3 +67,30 @@ GROUP BY
 
 ORDER BY billed_dbus DESC, total_dbus DESC;
 
+
+
+SELECT
+    identity_metadata.run_as AS run_as_identity,
+    usage_metadata.genie.surface AS genie_product,
+    usage_metadata.genie.channel AS access_channel,
+    sku_name,
+
+    COUNT(*) AS billing_records,
+    ROUND(SUM(usage_quantity), 2) AS total_dbus
+
+FROM system.billing.usage
+WHERE billing_origin_product = 'GENIE'
+  AND usage_unit = 'DBU'
+  AND usage_date >= DATE_SUB(CURRENT_DATE(), 89)
+
+GROUP BY
+    identity_metadata.run_as,
+    usage_metadata.genie.surface,
+    usage_metadata.genie.channel,
+    sku_name
+
+ORDER BY
+    genie_product,
+    total_dbus DESC;
+
+
