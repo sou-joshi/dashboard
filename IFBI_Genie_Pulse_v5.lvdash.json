@@ -1,0 +1,3151 @@
+{
+  "datasets": [
+    {
+      "name": "usage_kpis",
+      "displayName": "Usage Kpis",
+      "queryLines": [
+        "WITH usage_base AS (\n",
+        " SELECT u.account_id, CAST(u.workspace_id AS STRING) AS workspace_id,\n",
+        "        CAST(u.usage_date AS DATE) AS usage_date,\n",
+        "        LOWER(COALESCE(u.identity_metadata.run_as, 'unattributed')) AS user_identity,\n",
+        "        COALESCE(u.usage_metadata.genie.surface, 'UNKNOWN') AS genie_product,\n",
+        "        u.sku_name,\n",
+        "        CAST(u.usage_quantity AS DOUBLE) AS dbus,\n",
+        "        CASE WHEN u.sku_name='GENIE_FREE_USAGE' THEN CAST(u.usage_quantity AS DOUBLE) ELSE 0D END AS free_dbus,\n",
+        "        CASE WHEN u.sku_name<>'GENIE_FREE_USAGE' THEN CAST(u.usage_quantity AS DOUBLE) ELSE 0D END AS billed_dbus\n",
+        " FROM system.billing.usage u\n",
+        " WHERE u.billing_origin_product='GENIE'\n",
+        "   AND u.usage_unit='DBU'\n",
+        "   AND u.usage_date >= ADD_MONTHS(CAST(DATE_TRUNC('MONTH', CURRENT_DATE()) AS DATE), -12)\n",
+        ")\n",
+        "SELECT\n",
+        " COUNT(DISTINCT CASE WHEN usage_date>=DATE_SUB(CURRENT_DATE(),29)\n",
+        "  THEN user_identity END) AS identities_30d,\n",
+        " ROUND(SUM(CASE WHEN usage_date>=DATE_SUB(CURRENT_DATE(),29) THEN dbus ELSE 0D END),2) AS dbus_30d,\n",
+        " ROUND(SUM(CASE WHEN usage_date>=DATE_SUB(CURRENT_DATE(),29) THEN free_dbus ELSE 0D END),2) AS free_dbus_30d,\n",
+        " ROUND(SUM(CASE WHEN usage_date>=DATE_SUB(CURRENT_DATE(),29) THEN billed_dbus ELSE 0D END),2) AS billed_dbus_30d,\n",
+        " COUNT(DISTINCT CASE WHEN usage_date>=DATE_SUB(CURRENT_DATE(),29) THEN workspace_id END) AS workspaces_30d,\n",
+        " MAX(usage_date) AS latest_usage_date\n",
+        "FROM usage_base"
+      ]
+    },
+    {
+      "name": "usage_monthly",
+      "displayName": "Usage Monthly",
+      "queryLines": [
+        "WITH usage_base AS (\n",
+        " SELECT u.account_id, CAST(u.workspace_id AS STRING) AS workspace_id,\n",
+        "        CAST(u.usage_date AS DATE) AS usage_date,\n",
+        "        LOWER(COALESCE(u.identity_metadata.run_as, 'unattributed')) AS user_identity,\n",
+        "        COALESCE(u.usage_metadata.genie.surface, 'UNKNOWN') AS genie_product,\n",
+        "        u.sku_name,\n",
+        "        CAST(u.usage_quantity AS DOUBLE) AS dbus,\n",
+        "        CASE WHEN u.sku_name='GENIE_FREE_USAGE' THEN CAST(u.usage_quantity AS DOUBLE) ELSE 0D END AS free_dbus,\n",
+        "        CASE WHEN u.sku_name<>'GENIE_FREE_USAGE' THEN CAST(u.usage_quantity AS DOUBLE) ELSE 0D END AS billed_dbus\n",
+        " FROM system.billing.usage u\n",
+        " WHERE u.billing_origin_product='GENIE'\n",
+        "   AND u.usage_unit='DBU'\n",
+        "   AND u.usage_date >= ADD_MONTHS(CAST(DATE_TRUNC('MONTH', CURRENT_DATE()) AS DATE), -12)\n",
+        ")\n",
+        ", months AS (\n",
+        " SELECT EXPLODE(SEQUENCE(ADD_MONTHS(CAST(DATE_TRUNC('MONTH', CURRENT_DATE()) AS DATE), -12), CAST(DATE_TRUNC('MONTH', CURRENT_DATE()) AS DATE), INTERVAL 1 MONTH)) AS month_start\n",
+        "), monthly AS (\n",
+        " SELECT CAST(DATE_TRUNC('MONTH',usage_date) AS DATE) AS month_start,\n",
+        "  SUM(dbus) AS dbus, SUM(free_dbus) AS free_dbus, SUM(billed_dbus) AS billed_dbus,\n",
+        "  COUNT(DISTINCT user_identity) AS active_identities\n",
+        " FROM usage_base GROUP BY CAST(DATE_TRUNC('MONTH',usage_date) AS DATE)\n",
+        "), filled AS (\n",
+        " SELECT m.month_start,\n",
+        "  COALESCE(x.dbus,0D) AS dbus, COALESCE(x.free_dbus,0D) AS free_dbus,\n",
+        "  COALESCE(x.billed_dbus,0D) AS billed_dbus,\n",
+        "  COALESCE(x.active_identities,0) AS active_identities\n",
+        " FROM months m LEFT JOIN monthly x ON m.month_start=x.month_start\n",
+        "), compared AS (\n",
+        " SELECT *, LAG(dbus) OVER(ORDER BY month_start) AS prior_dbus,\n",
+        "  LAG(active_identities) OVER(ORDER BY month_start) AS prior_identities\n",
+        " FROM filled\n",
+        ")\n",
+        "SELECT month_start AS month,\n",
+        " DATE_FORMAT(month_start,'yyyy-MM') AS month_key,\n",
+        " CASE WHEN month_start=CAST(DATE_TRUNC('MONTH', CURRENT_DATE()) AS DATE) THEN 'CURRENT_PARTIAL' ELSE 'COMPLETE' END AS month_status,\n",
+        " ROUND(dbus,2) AS total_dbus, ROUND(free_dbus,2) AS free_dbus,\n",
+        " ROUND(billed_dbus,2) AS billed_dbus, active_identities,\n",
+        " CASE WHEN month_start=CAST(DATE_TRUNC('MONTH', CURRENT_DATE()) AS DATE) OR prior_dbus IS NULL OR prior_dbus<=0D THEN NULL\n",
+        "      ELSE ROUND(dbus/prior_dbus-1D,4) END AS mom_dbu_change,\n",
+        " CASE WHEN month_start=CAST(DATE_TRUNC('MONTH', CURRENT_DATE()) AS DATE) OR prior_identities IS NULL OR prior_identities<=0 THEN NULL\n",
+        "      ELSE ROUND(active_identities*1D/prior_identities-1D,4) END AS mom_identity_change\n",
+        "FROM compared ORDER BY month"
+      ]
+    },
+    {
+      "name": "product_monthly",
+      "displayName": "Product Monthly",
+      "queryLines": [
+        "WITH usage_base AS (\n",
+        " SELECT u.account_id, CAST(u.workspace_id AS STRING) AS workspace_id,\n",
+        "        CAST(u.usage_date AS DATE) AS usage_date,\n",
+        "        LOWER(COALESCE(u.identity_metadata.run_as, 'unattributed')) AS user_identity,\n",
+        "        COALESCE(u.usage_metadata.genie.surface, 'UNKNOWN') AS genie_product,\n",
+        "        u.sku_name,\n",
+        "        CAST(u.usage_quantity AS DOUBLE) AS dbus,\n",
+        "        CASE WHEN u.sku_name='GENIE_FREE_USAGE' THEN CAST(u.usage_quantity AS DOUBLE) ELSE 0D END AS free_dbus,\n",
+        "        CASE WHEN u.sku_name<>'GENIE_FREE_USAGE' THEN CAST(u.usage_quantity AS DOUBLE) ELSE 0D END AS billed_dbus\n",
+        " FROM system.billing.usage u\n",
+        " WHERE u.billing_origin_product='GENIE'\n",
+        "   AND u.usage_unit='DBU'\n",
+        "   AND u.usage_date >= ADD_MONTHS(CAST(DATE_TRUNC('MONTH', CURRENT_DATE()) AS DATE), -12)\n",
+        ")\n",
+        ", months AS (\n",
+        " SELECT EXPLODE(SEQUENCE(ADD_MONTHS(CAST(DATE_TRUNC('MONTH', CURRENT_DATE()) AS DATE), -12), CAST(DATE_TRUNC('MONTH', CURRENT_DATE()) AS DATE), INTERVAL 1 MONTH)) AS month_start\n",
+        "), products AS (\n",
+        " SELECT product FROM VALUES ('GENIE_CODE'),('GENIE_ONE'),('GENIE_AGENTS') AS v(product)\n",
+        "), agg AS (\n",
+        " SELECT CAST(DATE_TRUNC('MONTH',usage_date) AS DATE) AS month_start,\n",
+        "   genie_product, SUM(dbus) AS total_dbus, SUM(free_dbus) AS free_dbus,\n",
+        "   SUM(billed_dbus) AS billed_dbus,COUNT(DISTINCT user_identity) AS identities\n",
+        " FROM usage_base GROUP BY CAST(DATE_TRUNC('MONTH',usage_date) AS DATE),genie_product\n",
+        ")\n",
+        "SELECT m.month_start AS month, DATE_FORMAT(m.month_start,'yyyy-MM') AS month_key,\n",
+        " p.product AS genie_product,\n",
+        " ROUND(COALESCE(a.total_dbus,0D),2) AS total_dbus,\n",
+        " ROUND(COALESCE(a.free_dbus,0D),2) AS free_dbus,\n",
+        " ROUND(COALESCE(a.billed_dbus,0D),2) AS billed_dbus,\n",
+        " COALESCE(a.identities,0) AS active_identities\n",
+        "FROM months m CROSS JOIN products p\n",
+        "LEFT JOIN agg a ON m.month_start=a.month_start AND p.product=a.genie_product\n",
+        "ORDER BY month,genie_product"
+      ]
+    },
+    {
+      "name": "user_monthly",
+      "displayName": "User Monthly",
+      "queryLines": [
+        "WITH usage_base AS (\n",
+        " SELECT u.account_id, CAST(u.workspace_id AS STRING) AS workspace_id,\n",
+        "        CAST(u.usage_date AS DATE) AS usage_date,\n",
+        "        LOWER(COALESCE(u.identity_metadata.run_as, 'unattributed')) AS user_identity,\n",
+        "        COALESCE(u.usage_metadata.genie.surface, 'UNKNOWN') AS genie_product,\n",
+        "        u.sku_name,\n",
+        "        CAST(u.usage_quantity AS DOUBLE) AS dbus,\n",
+        "        CASE WHEN u.sku_name='GENIE_FREE_USAGE' THEN CAST(u.usage_quantity AS DOUBLE) ELSE 0D END AS free_dbus,\n",
+        "        CASE WHEN u.sku_name<>'GENIE_FREE_USAGE' THEN CAST(u.usage_quantity AS DOUBLE) ELSE 0D END AS billed_dbus\n",
+        " FROM system.billing.usage u\n",
+        " WHERE u.billing_origin_product='GENIE'\n",
+        "   AND u.usage_unit='DBU'\n",
+        "   AND u.usage_date >= ADD_MONTHS(CAST(DATE_TRUNC('MONTH', CURRENT_DATE()) AS DATE), -12)\n",
+        ")\n",
+        "SELECT\n",
+        " CAST(DATE_TRUNC('MONTH',usage_date) AS DATE) AS month,\n",
+        " DATE_FORMAT(usage_date,'yyyy-MM') AS month_key,\n",
+        " user_identity,\n",
+        " ROUND(SUM(dbus),2) AS total_dbus,\n",
+        " ROUND(SUM(free_dbus),2) AS free_dbus,\n",
+        " ROUND(SUM(billed_dbus),2) AS billed_dbus,\n",
+        " COUNT(DISTINCT usage_date) AS active_billing_days\n",
+        "FROM usage_base\n",
+        "GROUP BY CAST(DATE_TRUNC('MONTH',usage_date) AS DATE),\n",
+        " DATE_FORMAT(usage_date,'yyyy-MM'),user_identity\n",
+        "ORDER BY month DESC,total_dbus DESC"
+      ]
+    },
+    {
+      "name": "user_signals",
+      "displayName": "User Signals",
+      "queryLines": [
+        "WITH usage_base AS (\n",
+        " SELECT u.account_id, CAST(u.workspace_id AS STRING) AS workspace_id,\n",
+        "        CAST(u.usage_date AS DATE) AS usage_date,\n",
+        "        LOWER(COALESCE(u.identity_metadata.run_as, 'unattributed')) AS user_identity,\n",
+        "        COALESCE(u.usage_metadata.genie.surface, 'UNKNOWN') AS genie_product,\n",
+        "        u.sku_name,\n",
+        "        CAST(u.usage_quantity AS DOUBLE) AS dbus,\n",
+        "        CASE WHEN u.sku_name='GENIE_FREE_USAGE' THEN CAST(u.usage_quantity AS DOUBLE) ELSE 0D END AS free_dbus,\n",
+        "        CASE WHEN u.sku_name<>'GENIE_FREE_USAGE' THEN CAST(u.usage_quantity AS DOUBLE) ELSE 0D END AS billed_dbus\n",
+        " FROM system.billing.usage u\n",
+        " WHERE u.billing_origin_product='GENIE'\n",
+        "   AND u.usage_unit='DBU'\n",
+        "   AND u.usage_date >= ADD_MONTHS(CAST(DATE_TRUNC('MONTH', CURRENT_DATE()) AS DATE), -12)\n",
+        ")\n",
+        ", summarized AS (\n",
+        " SELECT user_identity,\n",
+        "  SUM(CASE WHEN usage_date>=DATE_SUB(CURRENT_DATE(),29) THEN dbus ELSE 0D END) AS dbus_30d,\n",
+        "  SUM(CASE WHEN usage_date>=DATE_SUB(CURRENT_DATE(),29) THEN billed_dbus ELSE 0D END) AS billed_dbus_30d,\n",
+        "  SUM(CASE WHEN usage_date BETWEEN DATE_SUB(CURRENT_DATE(),59) AND DATE_SUB(CURRENT_DATE(),30) THEN dbus ELSE 0D END) AS prior_30d,\n",
+        "  SUM(CASE WHEN usage_date>=DATE_SUB(CURRENT_DATE(),6) THEN dbus ELSE 0D END) AS last_7d,\n",
+        "  SUM(CASE WHEN usage_date BETWEEN DATE_SUB(CURRENT_DATE(),34) AND DATE_SUB(CURRENT_DATE(),7) THEN dbus ELSE 0D END) AS prior_28d,\n",
+        "  COUNT(DISTINCT CASE WHEN usage_date>=DATE_SUB(CURRENT_DATE(),29) THEN usage_date END) AS activity_days_30d,\n",
+        "  MIN(usage_date) AS first_metered_date, MAX(usage_date) AS last_metered_date\n",
+        " FROM usage_base GROUP BY user_identity\n",
+        "), ranked AS (\n",
+        " SELECT *,DENSE_RANK() OVER(ORDER BY dbus_30d DESC) AS consumption_rank,\n",
+        "  DENSE_RANK() OVER(ORDER BY billed_dbus_30d DESC) AS billed_rank,\n",
+        "  CASE WHEN prior_28d>0D THEN ROUND((last_7d/7D)/(prior_28d/28D),2) END AS weekly_rate_ratio\n",
+        " FROM summarized\n",
+        "), classified AS (\n",
+        " SELECT *, CASE\n",
+        "   WHEN billed_dbus_30d>0D AND billed_rank<=5 THEN 'High billed'\n",
+        "   WHEN consumption_rank<=5 AND dbus_30d>0D THEN 'Power user'\n",
+        "   WHEN last_7d>=15D AND weekly_rate_ratio>=3D THEN 'Rising fast'\n",
+        "   WHEN dbus_30d=0D AND prior_30d>0D THEN 'Dormant'\n",
+        "   WHEN dbus_30d>0D AND first_metered_date>=DATE_SUB(CURRENT_DATE(),29) THEN 'Newly active'\n",
+        "   ELSE 'Regular' END AS user_signal\n",
+        " FROM ranked\n",
+        ")\n",
+        "SELECT user_identity,user_signal,consumption_rank,\n",
+        " ROUND(dbus_30d,2) AS dbus_30d, ROUND(billed_dbus_30d,2) AS billed_dbus_30d,\n",
+        " ROUND(prior_30d,2) AS prior_30d, ROUND(last_7d,2) AS last_7d_dbus,\n",
+        " ROUND(prior_28d,2) AS prior_28d_dbus, weekly_rate_ratio,\n",
+        " activity_days_30d,first_metered_date,last_metered_date\n",
+        "FROM classified\n",
+        "WHERE dbus_30d>0D OR prior_30d>0D\n",
+        "ORDER BY CASE user_signal\n",
+        " WHEN 'High billed' THEN 1 WHEN 'Power user' THEN 2\n",
+        " WHEN 'Rising fast' THEN 3 WHEN 'Dormant' THEN 4\n",
+        " WHEN 'Newly active' THEN 5 ELSE 6 END,\n",
+        " billed_dbus_30d DESC,dbus_30d DESC"
+      ]
+    },
+    {
+      "name": "cost_kpis",
+      "displayName": "Cost Kpis",
+      "queryLines": [
+        "WITH joined AS (\n",
+        " SELECT u.account_id, CAST(u.workspace_id AS STRING) AS workspace_id,\n",
+        "        u.record_id, CAST(u.usage_date AS DATE) AS usage_date,\n",
+        "        LOWER(COALESCE(u.identity_metadata.run_as,'unattributed')) AS user_identity,\n",
+        "        COALESCE(u.usage_metadata.genie.surface,'UNKNOWN') AS genie_product,\n",
+        "        u.sku_name, CAST(u.usage_quantity AS DOUBLE) AS dbus,\n",
+        "        CASE WHEN u.sku_name='GENIE_FREE_USAGE' THEN 0D ELSE CAST(u.usage_quantity AS DOUBLE) END AS billed_dbus,\n",
+        "        CASE WHEN u.sku_name='GENIE_FREE_USAGE' THEN 0D\n",
+        "             WHEN lp.pricing.effective_list.default IS NULL THEN NULL\n",
+        "             ELSE CAST(u.usage_quantity AS DOUBLE)*CAST(lp.pricing.effective_list.default AS DOUBLE) END AS priced_usd,\n",
+        "        CASE WHEN u.sku_name<>'GENIE_FREE_USAGE' AND lp.pricing.effective_list.default IS NULL THEN 1 ELSE 0 END AS missing_price,\n",
+        "        ROW_NUMBER() OVER(PARTITION BY u.account_id,u.record_id\n",
+        "           ORDER BY lp.price_start_time DESC NULLS LAST) AS price_rn\n",
+        " FROM system.billing.usage u\n",
+        " LEFT JOIN system.billing.list_prices lp\n",
+        " ON u.sku_name=lp.sku_name AND u.cloud=lp.cloud AND u.usage_unit=lp.usage_unit\n",
+        " AND u.usage_end_time>=lp.price_start_time\n",
+        " AND (lp.price_end_time IS NULL OR u.usage_end_time<lp.price_end_time)\n",
+        " WHERE u.billing_origin_product='GENIE'\n",
+        " AND u.usage_unit='DBU'\n",
+        " AND u.usage_date >= ADD_MONTHS(CAST(DATE_TRUNC('MONTH', CURRENT_DATE()) AS DATE), -12)\n",
+        "), base AS (SELECT * FROM joined WHERE price_rn=1)\n",
+        ", user_cost AS (\n",
+        " SELECT user_identity, SUM(COALESCE(priced_usd,0D)) AS user_usd\n",
+        " FROM base WHERE usage_date>=DATE_SUB(CURRENT_DATE(),29) GROUP BY user_identity\n",
+        "), ranked_cost AS (\n",
+        " SELECT user_identity,user_usd, ROW_NUMBER() OVER(ORDER BY user_usd DESC) AS rn\n",
+        " FROM user_cost\n",
+        "), concentration AS (\n",
+        " SELECT ROUND(SUM(CASE WHEN rn<=5 THEN user_usd ELSE 0D END)*1D /\n",
+        " NULLIF(SUM(user_usd),0D),4) AS top5_cost_share\n",
+        " FROM ranked_cost\n",
+        "), totals AS (\n",
+        " SELECT\n",
+        "   SUM(CASE WHEN usage_date>=DATE_SUB(CURRENT_DATE(),29) THEN missing_price ELSE 0 END) AS unpriced_30d,\n",
+        "   SUM(CASE WHEN usage_date>=DATE_SUB(CURRENT_DATE(),29) THEN COALESCE(priced_usd,0D) ELSE 0D END) AS usd_30d,\n",
+        "   SUM(CASE WHEN usage_date>=CAST(DATE_TRUNC('MONTH', CURRENT_DATE()) AS DATE) THEN missing_price ELSE 0 END) AS unpriced_mtd,\n",
+        "   SUM(CASE WHEN usage_date>=CAST(DATE_TRUNC('MONTH', CURRENT_DATE()) AS DATE) THEN COALESCE(priced_usd,0D) ELSE 0D END) AS usd_mtd,\n",
+        "   SUM(CASE WHEN usage_date>=ADD_MONTHS(CAST(DATE_TRUNC('MONTH', CURRENT_DATE()) AS DATE),-1) AND usage_date<CAST(DATE_TRUNC('MONTH', CURRENT_DATE()) AS DATE) THEN missing_price ELSE 0 END) AS unpriced_last_month,\n",
+        "   SUM(CASE WHEN usage_date>=ADD_MONTHS(CAST(DATE_TRUNC('MONTH', CURRENT_DATE()) AS DATE),-1) AND usage_date<CAST(DATE_TRUNC('MONTH', CURRENT_DATE()) AS DATE) THEN COALESCE(priced_usd,0D) ELSE 0D END) AS usd_last_month,\n",
+        "   SUM(CASE WHEN usage_date>=ADD_MONTHS(CAST(DATE_TRUNC('MONTH', CURRENT_DATE()) AS DATE),-2) AND usage_date<ADD_MONTHS(CAST(DATE_TRUNC('MONTH', CURRENT_DATE()) AS DATE),-1) THEN missing_price ELSE 0 END) AS unpriced_prior_month,\n",
+        "   SUM(CASE WHEN usage_date>=ADD_MONTHS(CAST(DATE_TRUNC('MONTH', CURRENT_DATE()) AS DATE),-2) AND usage_date<ADD_MONTHS(CAST(DATE_TRUNC('MONTH', CURRENT_DATE()) AS DATE),-1) THEN COALESCE(priced_usd,0D) ELSE 0D END) AS usd_prior_month\n",
+        " FROM base\n",
+        ")\n",
+        "SELECT CASE WHEN unpriced_30d>0 THEN NULL ELSE ROUND(usd_30d,2) END AS estimated_cost_30d,\n",
+        " CASE WHEN unpriced_mtd>0 THEN NULL ELSE ROUND(usd_mtd,2) END AS estimated_cost_mtd,\n",
+        " CASE WHEN unpriced_mtd>0 THEN NULL ELSE ROUND(usd_mtd*DAY(LAST_DAY(CURRENT_DATE()))/GREATEST(DAY(CURRENT_DATE()),1),2) END AS projected_month_end_usd,\n",
+        " CASE WHEN unpriced_last_month>0 OR unpriced_prior_month>0 OR usd_prior_month<=0D\n",
+        " THEN NULL ELSE ROUND(usd_last_month/usd_prior_month-1D,4) END AS last_complete_month_mom_cost_change,\n",
+        " CASE WHEN unpriced_30d>0 THEN NULL ELSE top5_cost_share END AS top5_cost_share,\n",
+        " unpriced_30d AS unpriced_paid_records_30d,unpriced_mtd AS unpriced_paid_records_mtd\n",
+        "FROM totals CROSS JOIN concentration"
+      ]
+    },
+    {
+      "name": "cost_monthly",
+      "displayName": "Cost Monthly",
+      "queryLines": [
+        "WITH joined AS (\n",
+        " SELECT u.account_id, CAST(u.workspace_id AS STRING) AS workspace_id,\n",
+        "        u.record_id, CAST(u.usage_date AS DATE) AS usage_date,\n",
+        "        LOWER(COALESCE(u.identity_metadata.run_as,'unattributed')) AS user_identity,\n",
+        "        COALESCE(u.usage_metadata.genie.surface,'UNKNOWN') AS genie_product,\n",
+        "        u.sku_name, CAST(u.usage_quantity AS DOUBLE) AS dbus,\n",
+        "        CASE WHEN u.sku_name='GENIE_FREE_USAGE' THEN 0D ELSE CAST(u.usage_quantity AS DOUBLE) END AS billed_dbus,\n",
+        "        CASE WHEN u.sku_name='GENIE_FREE_USAGE' THEN 0D\n",
+        "             WHEN lp.pricing.effective_list.default IS NULL THEN NULL\n",
+        "             ELSE CAST(u.usage_quantity AS DOUBLE)*CAST(lp.pricing.effective_list.default AS DOUBLE) END AS priced_usd,\n",
+        "        CASE WHEN u.sku_name<>'GENIE_FREE_USAGE' AND lp.pricing.effective_list.default IS NULL THEN 1 ELSE 0 END AS missing_price,\n",
+        "        ROW_NUMBER() OVER(PARTITION BY u.account_id,u.record_id\n",
+        "           ORDER BY lp.price_start_time DESC NULLS LAST) AS price_rn\n",
+        " FROM system.billing.usage u\n",
+        " LEFT JOIN system.billing.list_prices lp\n",
+        " ON u.sku_name=lp.sku_name AND u.cloud=lp.cloud AND u.usage_unit=lp.usage_unit\n",
+        " AND u.usage_end_time>=lp.price_start_time\n",
+        " AND (lp.price_end_time IS NULL OR u.usage_end_time<lp.price_end_time)\n",
+        " WHERE u.billing_origin_product='GENIE'\n",
+        " AND u.usage_unit='DBU'\n",
+        " AND u.usage_date >= ADD_MONTHS(CAST(DATE_TRUNC('MONTH', CURRENT_DATE()) AS DATE), -12)\n",
+        "), base AS (SELECT * FROM joined WHERE price_rn=1)\n",
+        ", months AS (\n",
+        " SELECT EXPLODE(SEQUENCE(ADD_MONTHS(CAST(DATE_TRUNC('MONTH', CURRENT_DATE()) AS DATE), -12),CAST(DATE_TRUNC('MONTH', CURRENT_DATE()) AS DATE),INTERVAL 1 MONTH)) AS month_start\n",
+        "), agg AS (\n",
+        " SELECT CAST(DATE_TRUNC('MONTH',usage_date) AS DATE) AS month_start,\n",
+        "  SUM(COALESCE(priced_usd,0D)) AS priced_usd, SUM(missing_price) AS missing_price\n",
+        " FROM base GROUP BY CAST(DATE_TRUNC('MONTH',usage_date) AS DATE)\n",
+        "), filled AS (\n",
+        " SELECT m.month_start,COALESCE(a.priced_usd,0D) AS amount,\n",
+        " COALESCE(a.missing_price,0) AS missing_price FROM months m\n",
+        " LEFT JOIN agg a ON m.month_start=a.month_start\n",
+        "), compared AS (\n",
+        " SELECT *,LAG(amount) OVER(ORDER BY month_start) AS prior_amount,\n",
+        " LAG(missing_price) OVER(ORDER BY month_start) AS prior_missing FROM filled\n",
+        ")\n",
+        "SELECT month_start AS month,DATE_FORMAT(month_start,'yyyy-MM') AS month_key,\n",
+        " CASE WHEN month_start=CAST(DATE_TRUNC('MONTH', CURRENT_DATE()) AS DATE) THEN 'CURRENT_PARTIAL' ELSE 'COMPLETE' END AS month_status,\n",
+        " CASE WHEN missing_price>0 THEN NULL ELSE ROUND(amount,2) END AS estimated_cost_usd,\n",
+        " missing_price AS unpriced_paid_records,\n",
+        " CASE WHEN month_start=CAST(DATE_TRUNC('MONTH', CURRENT_DATE()) AS DATE) OR missing_price>0 OR COALESCE(prior_missing,0)>0\n",
+        " OR prior_amount IS NULL OR prior_amount<=0D THEN NULL\n",
+        " ELSE ROUND(amount/prior_amount-1D,4) END AS mom_cost_change\n",
+        "FROM compared ORDER BY month"
+      ]
+    },
+    {
+      "name": "cost_users",
+      "displayName": "Cost Users",
+      "queryLines": [
+        "WITH joined AS (\n",
+        " SELECT u.account_id, CAST(u.workspace_id AS STRING) AS workspace_id,\n",
+        "        u.record_id, CAST(u.usage_date AS DATE) AS usage_date,\n",
+        "        LOWER(COALESCE(u.identity_metadata.run_as,'unattributed')) AS user_identity,\n",
+        "        COALESCE(u.usage_metadata.genie.surface,'UNKNOWN') AS genie_product,\n",
+        "        u.sku_name, CAST(u.usage_quantity AS DOUBLE) AS dbus,\n",
+        "        CASE WHEN u.sku_name='GENIE_FREE_USAGE' THEN 0D ELSE CAST(u.usage_quantity AS DOUBLE) END AS billed_dbus,\n",
+        "        CASE WHEN u.sku_name='GENIE_FREE_USAGE' THEN 0D\n",
+        "             WHEN lp.pricing.effective_list.default IS NULL THEN NULL\n",
+        "             ELSE CAST(u.usage_quantity AS DOUBLE)*CAST(lp.pricing.effective_list.default AS DOUBLE) END AS priced_usd,\n",
+        "        CASE WHEN u.sku_name<>'GENIE_FREE_USAGE' AND lp.pricing.effective_list.default IS NULL THEN 1 ELSE 0 END AS missing_price,\n",
+        "        ROW_NUMBER() OVER(PARTITION BY u.account_id,u.record_id\n",
+        "           ORDER BY lp.price_start_time DESC NULLS LAST) AS price_rn\n",
+        " FROM system.billing.usage u\n",
+        " LEFT JOIN system.billing.list_prices lp\n",
+        " ON u.sku_name=lp.sku_name AND u.cloud=lp.cloud AND u.usage_unit=lp.usage_unit\n",
+        " AND u.usage_end_time>=lp.price_start_time\n",
+        " AND (lp.price_end_time IS NULL OR u.usage_end_time<lp.price_end_time)\n",
+        " WHERE u.billing_origin_product='GENIE'\n",
+        " AND u.usage_unit='DBU'\n",
+        " AND u.usage_date >= ADD_MONTHS(CAST(DATE_TRUNC('MONTH', CURRENT_DATE()) AS DATE), -12)\n",
+        "), base AS (SELECT * FROM joined WHERE price_rn=1)\n",
+        ", result AS (\n",
+        " SELECT user_identity,ROUND(SUM(billed_dbus),2) AS billed_dbus_30d,\n",
+        " ROUND(SUM(dbus),2) AS total_dbus_30d,\n",
+        " SUM(COALESCE(priced_usd,0D)) AS amount_usd,\n",
+        " SUM(missing_price) AS unpriced_paid_rows\n",
+        " FROM base WHERE usage_date>=DATE_SUB(CURRENT_DATE(),29)\n",
+        " GROUP BY user_identity\n",
+        ")\n",
+        "SELECT user_identity,total_dbus_30d,billed_dbus_30d,\n",
+        " CASE WHEN unpriced_paid_rows>0 THEN NULL ELSE ROUND(amount_usd,2) END AS estimated_cost_usd,\n",
+        " unpriced_paid_rows\n",
+        "FROM result ORDER BY estimated_cost_usd DESC NULLS LAST,billed_dbus_30d DESC,total_dbus_30d DESC LIMIT 50"
+      ]
+    },
+    {
+      "name": "workspace_coverage",
+      "displayName": "Workspace Coverage",
+      "queryLines": [
+        "WITH usage_base AS (\n",
+        " SELECT u.account_id, CAST(u.workspace_id AS STRING) AS workspace_id,\n",
+        "        CAST(u.usage_date AS DATE) AS usage_date,\n",
+        "        LOWER(COALESCE(u.identity_metadata.run_as, 'unattributed')) AS user_identity,\n",
+        "        COALESCE(u.usage_metadata.genie.surface, 'UNKNOWN') AS genie_product,\n",
+        "        u.sku_name,\n",
+        "        CAST(u.usage_quantity AS DOUBLE) AS dbus,\n",
+        "        CASE WHEN u.sku_name='GENIE_FREE_USAGE' THEN CAST(u.usage_quantity AS DOUBLE) ELSE 0D END AS free_dbus,\n",
+        "        CASE WHEN u.sku_name<>'GENIE_FREE_USAGE' THEN CAST(u.usage_quantity AS DOUBLE) ELSE 0D END AS billed_dbus\n",
+        " FROM system.billing.usage u\n",
+        " WHERE u.billing_origin_product='GENIE'\n",
+        "   AND u.usage_unit='DBU'\n",
+        "   AND u.usage_date >= ADD_MONTHS(CAST(DATE_TRUNC('MONTH', CURRENT_DATE()) AS DATE), -12)\n",
+        ")\n",
+        "SELECT account_id, workspace_id,\n",
+        " COUNT(*) AS usage_records_30d, COUNT(DISTINCT user_identity) AS identities_30d,\n",
+        " ROUND(SUM(dbus),2) AS dbus_30d,\n",
+        " ROUND(SUM(free_dbus),2) AS free_dbus_30d,\n",
+        " ROUND(SUM(billed_dbus),2) AS billed_dbus_30d,\n",
+        " SUM(CASE WHEN user_identity='unattributed' THEN 1 ELSE 0 END) AS unattributed_rows_30d,\n",
+        " MAX(usage_date) AS last_metered_date\n",
+        "FROM usage_base WHERE usage_date>=DATE_SUB(CURRENT_DATE(),29)\n",
+        "GROUP BY account_id,workspace_id ORDER BY dbus_30d DESC"
+      ]
+    },
+    {
+      "name": "channel_monthly",
+      "displayName": "Channel Monthly",
+      "queryLines": [
+        "SELECT\n  CAST(date_trunc('MONTH', usage_date) AS DATE) AS usage_month,\n  COALESCE(usage_metadata.genie.surface, 'UNKNOWN') AS genie_product,\n  COALESCE(usage_metadata.genie.channel, 'UNKNOWN') AS access_channel,\n  ROUND(SUM(usage_quantity), 2) AS total_dbus,\n  ROUND(SUM(CASE WHEN sku_name = 'GENIE_FREE_USAGE' THEN usage_quantity ELSE 0 END), 2) AS free_dbus,\n  ROUND(SUM(CASE WHEN sku_name <> 'GENIE_FREE_USAGE' THEN usage_quantity ELSE 0 END), 2) AS billed_dbus,\n  COUNT(DISTINCT identity_metadata.run_as) AS billing_identities\nFROM system.billing.usage\nWHERE billing_origin_product = 'GENIE'\n  AND usage_unit = 'DBU'\n  AND usage_date >= add_months(date_trunc('MONTH', current_date()), -12)\nGROUP BY 1, 2, 3\nORDER BY usage_month, genie_product, access_channel\n"
+      ]
+    },
+    {
+      "name": "channel_identities_30d",
+      "displayName": "Channel Identities 30D",
+      "queryLines": [
+        "WITH usage_priced AS (\n  SELECT\n    u.account_id,\n    u.record_id,\n    CAST(u.workspace_id AS STRING) AS workspace_id,\n    LOWER(COALESCE(u.identity_metadata.run_as, 'unattributed')) AS run_as_identity,\n    COALESCE(u.usage_metadata.genie.surface, 'UNKNOWN') AS genie_product,\n    COALESCE(u.usage_metadata.genie.channel, 'UNKNOWN') AS access_channel,\n    CAST(u.usage_quantity AS DOUBLE) AS total_dbus,\n    CASE WHEN u.sku_name = 'GENIE_FREE_USAGE' THEN 0D\n         ELSE CAST(u.usage_quantity AS DOUBLE) END AS billed_dbus,\n    CASE WHEN u.sku_name = 'GENIE_FREE_USAGE' THEN 0D\n         WHEN lp.pricing.effective_list.default IS NULL THEN NULL\n         ELSE CAST(u.usage_quantity AS DOUBLE) * CAST(lp.pricing.effective_list.default AS DOUBLE)\n    END AS estimated_list_usd,\n    CASE WHEN u.sku_name <> 'GENIE_FREE_USAGE'\n               AND lp.pricing.effective_list.default IS NULL THEN 1 ELSE 0 END AS missing_price,\n    ROW_NUMBER() OVER (PARTITION BY u.account_id, u.record_id\n                       ORDER BY lp.price_start_time DESC NULLS LAST) AS price_rank\n  FROM system.billing.usage u\n  LEFT JOIN system.billing.list_prices lp\n    ON u.sku_name = lp.sku_name\n   AND u.cloud = lp.cloud\n   AND u.usage_unit = lp.usage_unit\n   AND u.usage_end_time >= lp.price_start_time\n   AND (lp.price_end_time IS NULL OR u.usage_end_time < lp.price_end_time)\n  WHERE u.billing_origin_product = 'GENIE'\n    AND u.usage_unit = 'DBU'\n    AND u.usage_date >= date_sub(current_date(), 29)\n)\n, usage_rollup AS (\nSELECT\n  run_as_identity,\n  CASE WHEN run_as_identity RLIKE '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'\n       THEN 'UUID_FORMAT_REVIEW' ELSE 'NOT_CLASSIFIED' END AS identity_review,\n  workspace_id,\n  genie_product,\n  access_channel,\n  ROUND(SUM(total_dbus), 2) AS total_dbus,\n  ROUND(SUM(billed_dbus), 2) AS billed_dbus,\n  CASE WHEN SUM(missing_price) > 0 THEN CAST(NULL AS DOUBLE)\n       ELSE ROUND(SUM(estimated_list_usd), 2) END AS estimated_list_usd,\n  SUM(missing_price) AS unpriced_billed_rows\nFROM usage_priced\nWHERE price_rank = 1\nGROUP BY 1, 2, 3, 4, 5\n), principal_registry AS (\nSELECT CAST(NULL AS STRING) AS application_id, CAST(NULL AS STRING) AS display_name, CAST(NULL AS STRING) AS business_owner, CAST(NULL AS STRING) AS business_purpose, CAST(NULL AS STRING) AS cost_center WHERE FALSE\n)\nSELECT u.*,\n  COALESCE(p.display_name, u.run_as_identity) AS registered_display_name,\n  CASE WHEN p.application_id IS NOT NULL THEN 'VERIFIED_SERVICE_PRINCIPAL'\n       WHEN u.identity_review = 'UUID_FORMAT_REVIEW' THEN 'UUID_FORMAT_REVIEW'\n       ELSE 'UNCLASSIFIED' END AS identity_type,\n  COALESCE(p.business_owner, 'NOT_REGISTERED') AS business_owner,\n  COALESCE(p.business_purpose, 'NOT_ESTABLISHED') AS business_purpose,\n  COALESCE(p.cost_center, 'UNASSIGNED') AS cost_center\nFROM usage_rollup u\nLEFT JOIN principal_registry p ON LOWER(u.run_as_identity) = LOWER(p.application_id)\nORDER BY u.billed_dbus DESC, u.total_dbus DESC\nLIMIT 1000\n"
+      ]
+    },
+    {
+      "name": "agent_audit_90d",
+      "displayName": "Agent Audit 90D",
+      "queryLines": [
+        "WITH agent_actions AS (\n  SELECT\n    a.event_time,\n    CAST(a.workspace_id AS STRING) AS workspace_id,\n    COALESCE(a.identity_metadata.run_as, a.user_identity.email,\n             a.user_identity.subject_name, 'unattributed') AS audit_identity,\n    a.action_name,\n    COALESCE(a.request_params['space_id'],\n             a.request_params['genie_space_id'], 'UNKNOWN_SPACE') AS genie_space_id,\n    a.request_params['conversation_id'] AS conversation_id,\n    a.event_id,\n    a.source_ip_address,\n    a.user_agent\n  FROM system.access.audit a\n  WHERE a.event_date >= date_sub(current_date(), 89)\n    AND a.service_name = 'aibiGenie'\n    AND a.action_name IN (\n      'genieStartConversationMessage', 'genieCreateConversationMessage',\n      'genieCreateAgenticResponse', 'createConversationMessage',\n      'createAgenticResponse', 'createConversation', 'getSpace',\n      'updateSpace', 'deleteGenieAgent'\n    )\n)\n, event_rollup AS (\nSELECT\n  audit_identity,\n  workspace_id,\n  genie_space_id,\n  action_name,\n  COUNT(DISTINCT event_id) AS audit_events,\n  COUNT(DISTINCT conversation_id) AS conversations_seen,\n  COUNT(DISTINCT source_ip_address) AS distinct_source_ips,\n  MAX(event_time) AS last_event_time,\n  MAX(user_agent) AS sample_user_agent\nFROM agent_actions\nGROUP BY 1, 2, 3, 4\n), principal_registry AS (\nSELECT CAST(NULL AS STRING) AS application_id, CAST(NULL AS STRING) AS display_name, CAST(NULL AS STRING) AS business_owner, CAST(NULL AS STRING) AS business_purpose, CAST(NULL AS STRING) AS cost_center WHERE FALSE\n)\nSELECT a.*,\n  COALESCE(p.display_name, a.audit_identity) AS registered_display_name,\n  COALESCE(p.business_owner, 'NOT_REGISTERED') AS business_owner,\n  COALESCE(p.business_purpose, 'NOT_ESTABLISHED') AS business_purpose\nFROM event_rollup a\nLEFT JOIN principal_registry p ON LOWER(a.audit_identity) = LOWER(p.application_id)\nORDER BY a.audit_events DESC\nLIMIT 2000\n"
+      ]
+    },
+    {
+      "name": "agent_query_90d",
+      "displayName": "Agent Query 90D",
+      "queryLines": [
+        "SELECT\n  CAST(q.workspace_id AS STRING) AS workspace_id,\n  q.query_source.genie_space_id AS genie_space_id,\n  COALESCE(q.executed_by, 'unattributed') AS executed_by,\n  COALESCE(q.executed_as, 'unattributed') AS executed_as,\n  COALESCE(q.compute.warehouse_id, 'UNKNOWN_WAREHOUSE') AS warehouse_id,\n  COALESCE(q.client_application, 'UNKNOWN_CLIENT') AS client_application,\n  COUNT(DISTINCT q.statement_id) AS statements,\n  SUM(CASE WHEN q.execution_status = 'FAILED' THEN 1 ELSE 0 END) AS failed_statements,\n  ROUND(PERCENTILE_APPROX(q.total_duration_ms, 0.95) / 1000.0, 2) AS p95_duration_seconds,\n  ROUND(SUM(COALESCE(q.read_bytes, 0)) / 1073741824.0, 2) AS read_gib,\n  MAX(q.start_time) AS last_query_time\nFROM system.query.history q\nWHERE q.start_time >= date_sub(current_date(), 89)\n  AND q.query_source.genie_space_id IS NOT NULL\nGROUP BY 1, 2, 3, 4, 5, 6\nORDER BY statements DESC\nLIMIT 2000\n"
+      ]
+    },
+    {
+      "name": "agent_table_reads_90d",
+      "displayName": "Agent Table Reads 90D",
+      "queryLines": [
+        "WITH genie_reads AS (\n  SELECT\n    CAST(l.workspace_id AS STRING) AS workspace_id,\n    COALESCE(l.entity_metadata.genie_space_id,\n             q.query_source.genie_space_id) AS genie_space_id,\n    COALESCE(l.created_by, q.executed_as, 'unattributed') AS recorded_identity,\n    l.source_table_full_name,\n    l.statement_id,\n    l.event_time\n  FROM system.access.table_lineage l\n  LEFT JOIN system.query.history q\n    ON l.statement_id = q.statement_id\n   AND l.workspace_id = q.workspace_id\n   AND q.start_time >= date_sub(current_date(), 89)\n  WHERE l.event_date >= date_sub(current_date(), 89)\n    AND l.source_table_full_name IS NOT NULL\n)\nSELECT\n  workspace_id,\n  genie_space_id,\n  recorded_identity,\n  source_table_full_name,\n  COUNT(DISTINCT statement_id) AS statements_with_lineage,\n  MAX(event_time) AS last_read_time\nFROM genie_reads\nWHERE genie_space_id IS NOT NULL\nGROUP BY 1, 2, 3, 4\nORDER BY statements_with_lineage DESC, last_read_time DESC\nLIMIT 2000\n"
+      ]
+    }
+  ],
+  "pages": [
+    {
+      "name": "executive",
+      "displayName": "01 Executive Pulse",
+      "pageType": "PAGE_TYPE_CANVAS",
+      "layoutVersion": "GRID_V1",
+      "layout": [
+        {
+          "widget": {
+            "name": "exec_title",
+            "multilineTextboxSpec": {
+              "lines": [
+                "# GENIE PULSE  /  IFBI\n"
+              ]
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 0,
+            "width": 12,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "exec_subtitle",
+            "multilineTextboxSpec": {
+              "lines": [
+                "Usage, adoption and estimated spend. Rolling 30 days unless stated otherwise. Genie inference only; SQL warehouse spend is separate."
+              ]
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 2,
+            "width": 12,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "kpi_users",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "usage_kpis",
+                  "fields": [
+                    {
+                      "name": "identities_30d",
+                      "expression": "`identities_30d`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "frame": {
+                "showTitle": true,
+                "title": "Active identities"
+              },
+              "encodings": {
+                "value": {
+                  "fieldName": "identities_30d",
+                  "displayName": "Active identities",
+                  "format": {
+                    "type": "number",
+                    "abbreviation": "compact",
+                    "decimalPlaces": {
+                      "type": "max",
+                      "places": 1
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 4,
+            "width": 3,
+            "height": 4
+          }
+        },
+        {
+          "widget": {
+            "name": "kpi_dbus",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "usage_kpis",
+                  "fields": [
+                    {
+                      "name": "dbus_30d",
+                      "expression": "`dbus_30d`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "frame": {
+                "showTitle": true,
+                "title": "Genie DBUs"
+              },
+              "encodings": {
+                "value": {
+                  "fieldName": "dbus_30d",
+                  "displayName": "Genie DBUs",
+                  "format": {
+                    "type": "number",
+                    "abbreviation": "compact",
+                    "decimalPlaces": {
+                      "type": "max",
+                      "places": 2
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "position": {
+            "x": 3,
+            "y": 4,
+            "width": 3,
+            "height": 4
+          }
+        },
+        {
+          "widget": {
+            "name": "kpi_paid",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "usage_kpis",
+                  "fields": [
+                    {
+                      "name": "billed_dbus_30d",
+                      "expression": "`billed_dbus_30d`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "frame": {
+                "showTitle": true,
+                "title": "Billable DBUs"
+              },
+              "encodings": {
+                "value": {
+                  "fieldName": "billed_dbus_30d",
+                  "displayName": "Billable DBUs",
+                  "format": {
+                    "type": "number",
+                    "abbreviation": "compact",
+                    "decimalPlaces": {
+                      "type": "max",
+                      "places": 2
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "position": {
+            "x": 6,
+            "y": 4,
+            "width": 3,
+            "height": 4
+          }
+        },
+        {
+          "widget": {
+            "name": "kpi_usd",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "cost_kpis",
+                  "fields": [
+                    {
+                      "name": "estimated_cost_30d",
+                      "expression": "`estimated_cost_30d`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "frame": {
+                "showTitle": true,
+                "title": "Estimated USD",
+                "showDescription": true,
+                "description": "Null if any paid SKU lacks a price"
+              },
+              "encodings": {
+                "value": {
+                  "fieldName": "estimated_cost_30d",
+                  "displayName": "Estimated USD",
+                  "format": {
+                    "type": "number-currency",
+                    "currencyCode": "USD",
+                    "abbreviation": "compact",
+                    "decimalPlaces": {
+                      "type": "max",
+                      "places": 2
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "position": {
+            "x": 9,
+            "y": 4,
+            "width": 3,
+            "height": 4
+          }
+        },
+        {
+          "widget": {
+            "name": "exec_mom_header",
+            "multilineTextboxSpec": {
+              "lines": [
+                "## Month-on-month performance\n"
+              ]
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 8,
+            "width": 12,
+            "height": 1
+          }
+        },
+        {
+          "widget": {
+            "name": "kpi_mom_cost",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "cost_kpis",
+                  "fields": [
+                    {
+                      "name": "last_complete_month_mom_cost_change",
+                      "expression": "`last_complete_month_mom_cost_change`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "frame": {
+                "showTitle": true,
+                "title": "Last full month cost MoM",
+                "showDescription": true,
+                "description": "Compares last two completed calendar months"
+              },
+              "encodings": {
+                "value": {
+                  "fieldName": "last_complete_month_mom_cost_change",
+                  "displayName": "Last full month cost MoM",
+                  "format": {
+                    "type": "number-percent",
+                    "decimalPlaces": {
+                      "type": "max",
+                      "places": 1
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 9,
+            "width": 4,
+            "height": 4
+          }
+        },
+        {
+          "widget": {
+            "name": "kpi_runrate",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "cost_kpis",
+                  "fields": [
+                    {
+                      "name": "projected_month_end_usd",
+                      "expression": "`projected_month_end_usd`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "frame": {
+                "showTitle": true,
+                "title": "Projected month-end USD",
+                "showDescription": true,
+                "description": "Simple MTD calendar-day run rate"
+              },
+              "encodings": {
+                "value": {
+                  "fieldName": "projected_month_end_usd",
+                  "displayName": "Projected month-end USD",
+                  "format": {
+                    "type": "number-currency",
+                    "currencyCode": "USD",
+                    "abbreviation": "compact",
+                    "decimalPlaces": {
+                      "type": "max",
+                      "places": 2
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "position": {
+            "x": 4,
+            "y": 9,
+            "width": 4,
+            "height": 4
+          }
+        },
+        {
+          "widget": {
+            "name": "kpi_top5",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "cost_kpis",
+                  "fields": [
+                    {
+                      "name": "top5_cost_share",
+                      "expression": "`top5_cost_share`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "frame": {
+                "showTitle": true,
+                "title": "Top 5 estimated cost share",
+                "showDescription": true,
+                "description": "Last 30 days; null if pricing incomplete"
+              },
+              "encodings": {
+                "value": {
+                  "fieldName": "top5_cost_share",
+                  "displayName": "Top 5 estimated cost share",
+                  "format": {
+                    "type": "number-percent",
+                    "decimalPlaces": {
+                      "type": "max",
+                      "places": 1
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "position": {
+            "x": 8,
+            "y": 9,
+            "width": 4,
+            "height": 4
+          }
+        },
+        {
+          "widget": {
+            "name": "exec_monthly_dbu",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "usage_monthly",
+                  "fields": [
+                    {
+                      "name": "month",
+                      "expression": "`month`"
+                    },
+                    {
+                      "name": "total_dbus",
+                      "expression": "`total_dbus`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "area",
+              "frame": {
+                "showTitle": true,
+                "title": "Genie usage by month",
+                "showDescription": true,
+                "description": "13 months. Current month is partial."
+              },
+              "encodings": {
+                "x": {
+                  "fieldName": "month",
+                  "scale": {
+                    "type": "temporal"
+                  }
+                },
+                "y": {
+                  "fieldName": "total_dbus",
+                  "scale": {
+                    "type": "quantitative"
+                  }
+                }
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 13,
+            "width": 6,
+            "height": 7
+          }
+        },
+        {
+          "widget": {
+            "name": "exec_monthly_usd",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "cost_monthly",
+                  "fields": [
+                    {
+                      "name": "month",
+                      "expression": "`month`"
+                    },
+                    {
+                      "name": "estimated_cost_usd",
+                      "expression": "`estimated_cost_usd`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "line",
+              "frame": {
+                "showTitle": true,
+                "title": "Estimated cost by month",
+                "showDescription": true,
+                "description": "List price. Current month is partial."
+              },
+              "encodings": {
+                "x": {
+                  "fieldName": "month",
+                  "scale": {
+                    "type": "temporal"
+                  }
+                },
+                "y": {
+                  "fieldName": "estimated_cost_usd",
+                  "scale": {
+                    "type": "quantitative"
+                  }
+                }
+              }
+            }
+          },
+          "position": {
+            "x": 6,
+            "y": 13,
+            "width": 6,
+            "height": 7
+          }
+        },
+        {
+          "widget": {
+            "name": "exec_product_mix",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "product_monthly",
+                  "fields": [
+                    {
+                      "name": "month",
+                      "expression": "`month`"
+                    },
+                    {
+                      "name": "total_dbus",
+                      "expression": "`total_dbus`"
+                    },
+                    {
+                      "name": "genie_product",
+                      "expression": "`genie_product`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "area",
+              "frame": {
+                "showTitle": true,
+                "title": "Genie Code, One and Agents adoption"
+              },
+              "encodings": {
+                "x": {
+                  "fieldName": "month",
+                  "scale": {
+                    "type": "temporal"
+                  }
+                },
+                "y": {
+                  "fieldName": "total_dbus",
+                  "scale": {
+                    "type": "quantitative"
+                  }
+                },
+                "color": {
+                  "fieldName": "genie_product",
+                  "scale": {
+                    "type": "categorical",
+                    "mappings": [
+                      {
+                        "value": "GENIE_CODE",
+                        "color": "#A78BFA"
+                      },
+                      {
+                        "value": "GENIE_ONE",
+                        "color": "#48D9E8"
+                      },
+                      {
+                        "value": "GENIE_AGENTS",
+                        "color": "#5CE1B0"
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 20,
+            "width": 8,
+            "height": 7
+          }
+        },
+        {
+          "widget": {
+            "name": "exec_mtd_cost",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "cost_kpis",
+                  "fields": [
+                    {
+                      "name": "estimated_cost_mtd",
+                      "expression": "`estimated_cost_mtd`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "frame": {
+                "showTitle": true,
+                "title": "MTD estimated USD"
+              },
+              "encodings": {
+                "value": {
+                  "fieldName": "estimated_cost_mtd",
+                  "displayName": "MTD estimated USD",
+                  "format": {
+                    "type": "number-currency",
+                    "currencyCode": "USD",
+                    "abbreviation": "compact",
+                    "decimalPlaces": {
+                      "type": "max",
+                      "places": 2
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "position": {
+            "x": 8,
+            "y": 20,
+            "width": 4,
+            "height": 3
+          }
+        },
+        {
+          "widget": {
+            "name": "exec_price_gaps",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "cost_kpis",
+                  "fields": [
+                    {
+                      "name": "unpriced_paid_records_30d",
+                      "expression": "`unpriced_paid_records_30d`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "frame": {
+                "showTitle": true,
+                "title": "Unpriced paid rows",
+                "showDescription": true,
+                "description": "Any unpriced paid row makes the headline USD incomplete"
+              },
+              "encodings": {
+                "value": {
+                  "fieldName": "unpriced_paid_records_30d",
+                  "displayName": "Unpriced paid rows",
+                  "format": {
+                    "type": "number",
+                    "abbreviation": "compact",
+                    "decimalPlaces": {
+                      "type": "max",
+                      "places": 1
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "position": {
+            "x": 8,
+            "y": 23,
+            "width": 4,
+            "height": 4
+          }
+        },
+        {
+          "widget": {
+            "name": "exec_footnote",
+            "multilineTextboxSpec": {
+              "lines": [
+                "**Source:** Databricks system billing and list prices. Activity means metered DBUs, not prompts or chats. All USD amounts are estimates."
+              ]
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 27,
+            "width": 12,
+            "height": 2
+          }
+        }
+      ]
+    },
+    {
+      "name": "adoption",
+      "displayName": "02 Monthly Explorer",
+      "pageType": "PAGE_TYPE_CANVAS",
+      "layoutVersion": "GRID_V1",
+      "layout": [
+        {
+          "widget": {
+            "name": "monthly_title",
+            "multilineTextboxSpec": {
+              "lines": [
+                "# ADOPTION  /  MONTHLY EXPLORER\n"
+              ]
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 0,
+            "width": 12,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "monthly_sub",
+            "multilineTextboxSpec": {
+              "lines": [
+                "Complete-month MoM comparisons exclude the current partial month. Choose a month below to focus the user detail table."
+              ]
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 2,
+            "width": 12,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "monthly_active",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "usage_monthly",
+                  "fields": [
+                    {
+                      "name": "month",
+                      "expression": "`month`"
+                    },
+                    {
+                      "name": "active_identities",
+                      "expression": "`active_identities`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "line",
+              "frame": {
+                "showTitle": true,
+                "title": "Active identities by month"
+              },
+              "encodings": {
+                "x": {
+                  "fieldName": "month",
+                  "scale": {
+                    "type": "temporal"
+                  }
+                },
+                "y": {
+                  "fieldName": "active_identities",
+                  "scale": {
+                    "type": "quantitative"
+                  }
+                }
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 4,
+            "width": 6,
+            "height": 7
+          }
+        },
+        {
+          "widget": {
+            "name": "monthly_product_line",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "product_monthly",
+                  "fields": [
+                    {
+                      "name": "month",
+                      "expression": "`month`"
+                    },
+                    {
+                      "name": "total_dbus",
+                      "expression": "`total_dbus`"
+                    },
+                    {
+                      "name": "genie_product",
+                      "expression": "`genie_product`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "line",
+              "frame": {
+                "showTitle": true,
+                "title": "Monthly Genie usage by product"
+              },
+              "encodings": {
+                "x": {
+                  "fieldName": "month",
+                  "scale": {
+                    "type": "temporal"
+                  }
+                },
+                "y": {
+                  "fieldName": "total_dbus",
+                  "scale": {
+                    "type": "quantitative"
+                  }
+                },
+                "color": {
+                  "fieldName": "genie_product",
+                  "scale": {
+                    "type": "categorical",
+                    "mappings": [
+                      {
+                        "value": "GENIE_CODE",
+                        "color": "#A78BFA"
+                      },
+                      {
+                        "value": "GENIE_ONE",
+                        "color": "#48D9E8"
+                      },
+                      {
+                        "value": "GENIE_AGENTS",
+                        "color": "#5CE1B0"
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          },
+          "position": {
+            "x": 6,
+            "y": 4,
+            "width": 6,
+            "height": 7
+          }
+        },
+        {
+          "widget": {
+            "name": "monthly_usage_table",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "usage_monthly",
+                  "fields": [
+                    {
+                      "name": "month_key",
+                      "expression": "`month_key`"
+                    },
+                    {
+                      "name": "month_status",
+                      "expression": "`month_status`"
+                    },
+                    {
+                      "name": "total_dbus",
+                      "expression": "`total_dbus`"
+                    },
+                    {
+                      "name": "active_identities",
+                      "expression": "`active_identities`"
+                    },
+                    {
+                      "name": "mom_dbu_change",
+                      "expression": "`mom_dbu_change`"
+                    },
+                    {
+                      "name": "mom_identity_change",
+                      "expression": "`mom_identity_change`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "table",
+              "frame": {
+                "showTitle": true,
+                "title": "Monthly adoption and growth"
+              },
+              "encodings": {
+                "columns": [
+                  {
+                    "fieldName": "month_key",
+                    "displayName": "Month"
+                  },
+                  {
+                    "fieldName": "month_status",
+                    "displayName": "Status"
+                  },
+                  {
+                    "fieldName": "total_dbus",
+                    "displayName": "Total DBUs",
+                    "format": {
+                      "type": "number",
+                      "abbreviation": "compact",
+                      "decimalPlaces": {
+                        "type": "max",
+                        "places": 2
+                      }
+                    }
+                  },
+                  {
+                    "fieldName": "active_identities",
+                    "displayName": "Active identities",
+                    "format": {
+                      "type": "number",
+                      "abbreviation": "compact",
+                      "decimalPlaces": {
+                        "type": "max",
+                        "places": 1
+                      }
+                    }
+                  },
+                  {
+                    "fieldName": "mom_dbu_change",
+                    "displayName": "DBU MoM",
+                    "format": {
+                      "type": "number-percent",
+                      "decimalPlaces": {
+                        "type": "max",
+                        "places": 1
+                      }
+                    }
+                  },
+                  {
+                    "fieldName": "mom_identity_change",
+                    "displayName": "Identity MoM",
+                    "format": {
+                      "type": "number-percent",
+                      "decimalPlaces": {
+                        "type": "max",
+                        "places": 1
+                      }
+                    }
+                  }
+                ]
+              },
+              "rowsPerPage": 13
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 11,
+            "width": 12,
+            "height": 8
+          }
+        },
+        {
+          "widget": {
+            "name": "monthly_segment_header",
+            "multilineTextboxSpec": {
+              "lines": [
+                "## Monthly user explorer\n"
+              ]
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 19,
+            "width": 8,
+            "height": 1
+          }
+        },
+        {
+          "widget": {
+            "name": "month_selector",
+            "queries": [
+              {
+                "name": "user_month_query",
+                "query": {
+                  "datasetName": "user_monthly",
+                  "fields": [
+                    {
+                      "name": "month_key",
+                      "expression": "`month_key`"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "filter-single-select",
+              "frame": {
+                "showTitle": true,
+                "title": "Select month for user detail"
+              },
+              "encodings": {
+                "fields": [
+                  {
+                    "fieldName": "month_key",
+                    "displayName": "Month",
+                    "queryName": "user_month_query"
+                  }
+                ]
+              }
+            }
+          },
+          "position": {
+            "x": 8,
+            "y": 20,
+            "width": 4,
+            "height": 3
+          }
+        },
+        {
+          "widget": {
+            "name": "monthly_user_detail",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "user_monthly",
+                  "fields": [
+                    {
+                      "name": "month_key",
+                      "expression": "`month_key`"
+                    },
+                    {
+                      "name": "user_identity",
+                      "expression": "`user_identity`"
+                    },
+                    {
+                      "name": "total_dbus",
+                      "expression": "`total_dbus`"
+                    },
+                    {
+                      "name": "free_dbus",
+                      "expression": "`free_dbus`"
+                    },
+                    {
+                      "name": "billed_dbus",
+                      "expression": "`billed_dbus`"
+                    },
+                    {
+                      "name": "active_billing_days",
+                      "expression": "`active_billing_days`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "table",
+              "frame": {
+                "showTitle": true,
+                "title": "User-level activity for the selected month"
+              },
+              "encodings": {
+                "columns": [
+                  {
+                    "fieldName": "month_key",
+                    "displayName": "Month"
+                  },
+                  {
+                    "fieldName": "user_identity",
+                    "displayName": "Identity"
+                  },
+                  {
+                    "fieldName": "total_dbus",
+                    "displayName": "Total DBUs",
+                    "format": {
+                      "type": "number",
+                      "abbreviation": "compact",
+                      "decimalPlaces": {
+                        "type": "max",
+                        "places": 2
+                      }
+                    }
+                  },
+                  {
+                    "fieldName": "free_dbus",
+                    "displayName": "Free DBUs",
+                    "format": {
+                      "type": "number",
+                      "abbreviation": "compact",
+                      "decimalPlaces": {
+                        "type": "max",
+                        "places": 2
+                      }
+                    }
+                  },
+                  {
+                    "fieldName": "billed_dbus",
+                    "displayName": "Billable DBUs",
+                    "format": {
+                      "type": "number",
+                      "abbreviation": "compact",
+                      "decimalPlaces": {
+                        "type": "max",
+                        "places": 2
+                      }
+                    }
+                  },
+                  {
+                    "fieldName": "active_billing_days",
+                    "displayName": "Billing days",
+                    "format": {
+                      "type": "number",
+                      "abbreviation": "compact",
+                      "decimalPlaces": {
+                        "type": "max",
+                        "places": 1
+                      }
+                    }
+                  }
+                ]
+              },
+              "rowsPerPage": 20
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 23,
+            "width": 12,
+            "height": 10
+          }
+        },
+        {
+          "widget": {
+            "name": "monthly_foot",
+            "multilineTextboxSpec": {
+              "lines": [
+                "**Note:** The month selector filters the user table, not the historical trend charts. Billing days are not prompt counts."
+              ]
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 33,
+            "width": 12,
+            "height": 2
+          }
+        }
+      ]
+    },
+    {
+      "name": "governance",
+      "displayName": "03 User Intelligence",
+      "pageType": "PAGE_TYPE_CANVAS",
+      "layoutVersion": "GRID_V1",
+      "layout": [
+        {
+          "widget": {
+            "name": "governance_title",
+            "multilineTextboxSpec": {
+              "lines": [
+                "# PEOPLE  /  GOVERNANCE INTELLIGENCE\n"
+              ]
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 0,
+            "width": 12,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "governance_sub",
+            "multilineTextboxSpec": {
+              "lines": [
+                "Prioritize sustained high usage and billed consumption, then newly active identities and sharp changes. Signals are review prompts, not misconduct findings."
+              ]
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 2,
+            "width": 12,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "gov_paid_cost",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "cost_kpis",
+                  "fields": [
+                    {
+                      "name": "estimated_cost_30d",
+                      "expression": "`estimated_cost_30d`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "frame": {
+                "showTitle": true,
+                "title": "Estimated USD / 30 days"
+              },
+              "encodings": {
+                "value": {
+                  "fieldName": "estimated_cost_30d",
+                  "displayName": "Estimated USD / 30 days",
+                  "format": {
+                    "type": "number-currency",
+                    "currencyCode": "USD",
+                    "abbreviation": "compact",
+                    "decimalPlaces": {
+                      "type": "max",
+                      "places": 2
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 4,
+            "width": 4,
+            "height": 4
+          }
+        },
+        {
+          "widget": {
+            "name": "gov_top5",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "cost_kpis",
+                  "fields": [
+                    {
+                      "name": "top5_cost_share",
+                      "expression": "`top5_cost_share`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "frame": {
+                "showTitle": true,
+                "title": "Top 5 cost share"
+              },
+              "encodings": {
+                "value": {
+                  "fieldName": "top5_cost_share",
+                  "displayName": "Top 5 cost share",
+                  "format": {
+                    "type": "number-percent",
+                    "decimalPlaces": {
+                      "type": "max",
+                      "places": 1
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "position": {
+            "x": 4,
+            "y": 4,
+            "width": 4,
+            "height": 4
+          }
+        },
+        {
+          "widget": {
+            "name": "gov_price_missing",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "cost_kpis",
+                  "fields": [
+                    {
+                      "name": "unpriced_paid_records_30d",
+                      "expression": "`unpriced_paid_records_30d`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "frame": {
+                "showTitle": true,
+                "title": "Unpriced paid records"
+              },
+              "encodings": {
+                "value": {
+                  "fieldName": "unpriced_paid_records_30d",
+                  "displayName": "Unpriced paid records",
+                  "format": {
+                    "type": "number",
+                    "abbreviation": "compact",
+                    "decimalPlaces": {
+                      "type": "max",
+                      "places": 1
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "position": {
+            "x": 8,
+            "y": 4,
+            "width": 4,
+            "height": 4
+          }
+        },
+        {
+          "widget": {
+            "name": "gov_cohort_people",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "user_signals",
+                  "fields": [
+                    {
+                      "name": "user_signal",
+                      "expression": "`user_signal`"
+                    },
+                    {
+                      "name": "count(user_identity)",
+                      "expression": "COUNT(`user_identity`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "bar",
+              "frame": {
+                "showTitle": true,
+                "title": "Identity segments"
+              },
+              "encodings": {
+                "x": {
+                  "fieldName": "count(user_identity)",
+                  "scale": {
+                    "type": "quantitative"
+                  }
+                },
+                "y": {
+                  "fieldName": "user_signal",
+                  "scale": {
+                    "type": "categorical",
+                    "sort": {
+                      "by": "custom-order",
+                      "orderedValues": [
+                        "High billed",
+                        "Power user",
+                        "Rising fast",
+                        "Newly active",
+                        "Dormant",
+                        "Regular"
+                      ]
+                    }
+                  }
+                },
+                "color": {
+                  "fieldName": "user_signal",
+                  "scale": {
+                    "type": "categorical",
+                    "mappings": [
+                      {
+                        "value": "High billed",
+                        "color": "#FFBE72"
+                      },
+                      {
+                        "value": "Power user",
+                        "color": "#A78BFA"
+                      },
+                      {
+                        "value": "Rising fast",
+                        "color": "#F67D96"
+                      },
+                      {
+                        "value": "Dormant",
+                        "color": "#77A4BC"
+                      },
+                      {
+                        "value": "Newly active",
+                        "color": "#5CE1B0"
+                      },
+                      {
+                        "value": "Regular",
+                        "color": "#46D2E8"
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 8,
+            "width": 6,
+            "height": 6
+          }
+        },
+        {
+          "widget": {
+            "name": "gov_cohort_volume",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "user_signals",
+                  "fields": [
+                    {
+                      "name": "user_signal",
+                      "expression": "`user_signal`"
+                    },
+                    {
+                      "name": "sum(dbus_30d)",
+                      "expression": "SUM(`dbus_30d`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "bar",
+              "frame": {
+                "showTitle": true,
+                "title": "DBUs by user segment"
+              },
+              "encodings": {
+                "x": {
+                  "fieldName": "sum(dbus_30d)",
+                  "scale": {
+                    "type": "quantitative"
+                  }
+                },
+                "y": {
+                  "fieldName": "user_signal",
+                  "scale": {
+                    "type": "categorical",
+                    "sort": {
+                      "by": "custom-order",
+                      "orderedValues": [
+                        "High billed",
+                        "Power user",
+                        "Rising fast",
+                        "Newly active",
+                        "Dormant",
+                        "Regular"
+                      ]
+                    }
+                  }
+                },
+                "color": {
+                  "fieldName": "user_signal",
+                  "scale": {
+                    "type": "categorical",
+                    "mappings": [
+                      {
+                        "value": "High billed",
+                        "color": "#FFBE72"
+                      },
+                      {
+                        "value": "Power user",
+                        "color": "#A78BFA"
+                      },
+                      {
+                        "value": "Rising fast",
+                        "color": "#F67D96"
+                      },
+                      {
+                        "value": "Dormant",
+                        "color": "#77A4BC"
+                      },
+                      {
+                        "value": "Newly active",
+                        "color": "#5CE1B0"
+                      },
+                      {
+                        "value": "Regular",
+                        "color": "#46D2E8"
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          },
+          "position": {
+            "x": 6,
+            "y": 8,
+            "width": 6,
+            "height": 6
+          }
+        },
+        {
+          "widget": {
+            "name": "gov_cost_users",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "cost_users",
+                  "fields": [
+                    {
+                      "name": "user_identity",
+                      "expression": "`user_identity`"
+                    },
+                    {
+                      "name": "total_dbus_30d",
+                      "expression": "`total_dbus_30d`"
+                    },
+                    {
+                      "name": "billed_dbus_30d",
+                      "expression": "`billed_dbus_30d`"
+                    },
+                    {
+                      "name": "estimated_cost_usd",
+                      "expression": "`estimated_cost_usd`"
+                    },
+                    {
+                      "name": "unpriced_paid_rows",
+                      "expression": "`unpriced_paid_rows`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "table",
+              "frame": {
+                "showTitle": true,
+                "title": "Cost leaderboard",
+                "showDescription": true,
+                "description": "Incomplete USD is null, not zero"
+              },
+              "encodings": {
+                "columns": [
+                  {
+                    "fieldName": "user_identity",
+                    "displayName": "Identity"
+                  },
+                  {
+                    "fieldName": "total_dbus_30d",
+                    "displayName": "All DBUs",
+                    "format": {
+                      "type": "number",
+                      "abbreviation": "compact",
+                      "decimalPlaces": {
+                        "type": "max",
+                        "places": 2
+                      }
+                    }
+                  },
+                  {
+                    "fieldName": "billed_dbus_30d",
+                    "displayName": "Billable DBUs",
+                    "format": {
+                      "type": "number",
+                      "abbreviation": "compact",
+                      "decimalPlaces": {
+                        "type": "max",
+                        "places": 2
+                      }
+                    }
+                  },
+                  {
+                    "fieldName": "estimated_cost_usd",
+                    "displayName": "Estimated USD",
+                    "format": {
+                      "type": "number-currency",
+                      "currencyCode": "USD",
+                      "abbreviation": "compact",
+                      "decimalPlaces": {
+                        "type": "max",
+                        "places": 2
+                      }
+                    }
+                  },
+                  {
+                    "fieldName": "unpriced_paid_rows",
+                    "displayName": "Unpriced rows"
+                  }
+                ]
+              },
+              "rowsPerPage": 20
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 14,
+            "width": 12,
+            "height": 8
+          }
+        },
+        {
+          "widget": {
+            "name": "gov_smart_users",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "user_signals",
+                  "fields": [
+                    {
+                      "name": "user_identity",
+                      "expression": "`user_identity`"
+                    },
+                    {
+                      "name": "user_signal",
+                      "expression": "`user_signal`"
+                    },
+                    {
+                      "name": "dbus_30d",
+                      "expression": "`dbus_30d`"
+                    },
+                    {
+                      "name": "billed_dbus_30d",
+                      "expression": "`billed_dbus_30d`"
+                    },
+                    {
+                      "name": "last_7d_dbus",
+                      "expression": "`last_7d_dbus`"
+                    },
+                    {
+                      "name": "weekly_rate_ratio",
+                      "expression": "`weekly_rate_ratio`"
+                    },
+                    {
+                      "name": "activity_days_30d",
+                      "expression": "`activity_days_30d`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "table",
+              "frame": {
+                "showTitle": true,
+                "title": "Usage intelligence and review queue",
+                "showDescription": true,
+                "description": "Sustained high users appear before spikes; comparison is 7 days vs preceding 28"
+              },
+              "encodings": {
+                "columns": [
+                  {
+                    "fieldName": "user_identity",
+                    "displayName": "Identity"
+                  },
+                  {
+                    "fieldName": "user_signal",
+                    "displayName": "Attention segment"
+                  },
+                  {
+                    "fieldName": "dbus_30d",
+                    "displayName": "Last 30d DBUs",
+                    "format": {
+                      "type": "number",
+                      "abbreviation": "compact",
+                      "decimalPlaces": {
+                        "type": "max",
+                        "places": 2
+                      }
+                    }
+                  },
+                  {
+                    "fieldName": "billed_dbus_30d",
+                    "displayName": "Billable DBUs",
+                    "format": {
+                      "type": "number",
+                      "abbreviation": "compact",
+                      "decimalPlaces": {
+                        "type": "max",
+                        "places": 2
+                      }
+                    }
+                  },
+                  {
+                    "fieldName": "last_7d_dbus",
+                    "displayName": "Last 7d DBUs",
+                    "format": {
+                      "type": "number",
+                      "abbreviation": "compact",
+                      "decimalPlaces": {
+                        "type": "max",
+                        "places": 2
+                      }
+                    }
+                  },
+                  {
+                    "fieldName": "weekly_rate_ratio",
+                    "displayName": "Usage rate multiplier"
+                  },
+                  {
+                    "fieldName": "activity_days_30d",
+                    "displayName": "Active billing days"
+                  }
+                ]
+              },
+              "rowsPerPage": 20
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 22,
+            "width": 12,
+            "height": 10
+          }
+        },
+        {
+          "widget": {
+            "name": "gov_workspaces",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "workspace_coverage",
+                  "fields": [
+                    {
+                      "name": "account_id",
+                      "expression": "`account_id`"
+                    },
+                    {
+                      "name": "workspace_id",
+                      "expression": "`workspace_id`"
+                    },
+                    {
+                      "name": "identities_30d",
+                      "expression": "`identities_30d`"
+                    },
+                    {
+                      "name": "dbus_30d",
+                      "expression": "`dbus_30d`"
+                    },
+                    {
+                      "name": "billed_dbus_30d",
+                      "expression": "`billed_dbus_30d`"
+                    },
+                    {
+                      "name": "unattributed_rows_30d",
+                      "expression": "`unattributed_rows_30d`"
+                    },
+                    {
+                      "name": "last_metered_date",
+                      "expression": "`last_metered_date`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "table",
+              "frame": {
+                "showTitle": true,
+                "title": "Coverage and identity attribution"
+              },
+              "encodings": {
+                "columns": [
+                  {
+                    "fieldName": "account_id",
+                    "displayName": "Account"
+                  },
+                  {
+                    "fieldName": "workspace_id",
+                    "displayName": "Workspace"
+                  },
+                  {
+                    "fieldName": "identities_30d",
+                    "displayName": "Identities"
+                  },
+                  {
+                    "fieldName": "dbus_30d",
+                    "displayName": "Total DBUs",
+                    "format": {
+                      "type": "number",
+                      "abbreviation": "compact",
+                      "decimalPlaces": {
+                        "type": "max",
+                        "places": 2
+                      }
+                    }
+                  },
+                  {
+                    "fieldName": "billed_dbus_30d",
+                    "displayName": "Billable DBUs",
+                    "format": {
+                      "type": "number",
+                      "abbreviation": "compact",
+                      "decimalPlaces": {
+                        "type": "max",
+                        "places": 2
+                      }
+                    }
+                  },
+                  {
+                    "fieldName": "unattributed_rows_30d",
+                    "displayName": "Unattributed billing records"
+                  },
+                  {
+                    "fieldName": "last_metered_date",
+                    "displayName": "Latest usage date"
+                  }
+                ]
+              },
+              "rowsPerPage": 10
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 32,
+            "width": 12,
+            "height": 7
+          }
+        },
+        {
+          "widget": {
+            "name": "governance_footer",
+            "multilineTextboxSpec": {
+              "lines": [
+                "**Governance boundary:** No prompts, generated SQL or underlying insurance records are collected. Price estimates exclude warehouse infrastructure and contractual discounts."
+              ]
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 39,
+            "width": 12,
+            "height": 2
+          }
+        }
+      ]
+    },
+    {
+      "name": "04_api_ui",
+      "displayName": "04 API vs UI",
+      "pageType": "PAGE_TYPE_CANVAS",
+      "layoutVersion": "GRID_V1",
+      "layout": [
+        {
+          "widget": {
+            "name": "channel_intro",
+            "multilineTextboxSpec": {
+              "lines": [
+                "## API and UI Consumption\n",
+                "\n",
+                "Compare Genie access channels without treating API calls as proof of a service principal."
+              ]
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 0,
+            "width": 12,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "channel_monthly_chart",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "channel_monthly",
+                  "fields": [
+                    {
+                      "name": "monthly(usage_month)",
+                      "expression": "DATE_TRUNC(\"MONTH\", `usage_month`)"
+                    },
+                    {
+                      "name": "sum(total_dbus)",
+                      "expression": "SUM(`total_dbus`)"
+                    },
+                    {
+                      "name": "access_channel",
+                      "expression": "`access_channel`"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "line",
+              "encodings": {
+                "x": {
+                  "fieldName": "monthly(usage_month)",
+                  "scale": {
+                    "type": "temporal"
+                  }
+                },
+                "y": {
+                  "fieldName": "sum(total_dbus)",
+                  "scale": {
+                    "type": "quantitative"
+                  }
+                },
+                "color": {
+                  "fieldName": "access_channel",
+                  "scale": {
+                    "type": "categorical",
+                    "mappings": [
+                      {
+                        "value": "API",
+                        "color": "#49D3EA"
+                      },
+                      {
+                        "value": "UI",
+                        "color": "#A98AFF"
+                      },
+                      {
+                        "value": "UNKNOWN",
+                        "color": "#FFBC70"
+                      }
+                    ]
+                  }
+                }
+              },
+              "frame": {
+                "title": "API vs UI DBUs by Month",
+                "showTitle": true
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 2,
+            "width": 8,
+            "height": 7
+          }
+        },
+        {
+          "widget": {
+            "name": "channel_product_chart",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "channel_monthly",
+                  "fields": [
+                    {
+                      "name": "genie_product",
+                      "expression": "`genie_product`"
+                    },
+                    {
+                      "name": "sum(total_dbus)",
+                      "expression": "SUM(`total_dbus`)"
+                    },
+                    {
+                      "name": "access_channel",
+                      "expression": "`access_channel`"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "bar",
+              "encodings": {
+                "x": {
+                  "fieldName": "genie_product",
+                  "scale": {
+                    "type": "categorical"
+                  }
+                },
+                "y": {
+                  "fieldName": "sum(total_dbus)",
+                  "scale": {
+                    "type": "quantitative"
+                  }
+                },
+                "color": {
+                  "fieldName": "access_channel",
+                  "scale": {
+                    "type": "categorical",
+                    "mappings": [
+                      {
+                        "value": "API",
+                        "color": "#49D3EA"
+                      },
+                      {
+                        "value": "UI",
+                        "color": "#A98AFF"
+                      },
+                      {
+                        "value": "UNKNOWN",
+                        "color": "#FFBC70"
+                      }
+                    ]
+                  }
+                }
+              },
+              "frame": {
+                "title": "Genie Products by Access Channel",
+                "showTitle": true
+              },
+              "mark": {
+                "layout": "group"
+              }
+            }
+          },
+          "position": {
+            "x": 8,
+            "y": 2,
+            "width": 4,
+            "height": 7
+          }
+        },
+        {
+          "widget": {
+            "name": "channel_monthly_table",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "channel_monthly",
+                  "fields": [
+                    {
+                      "name": "usage_month",
+                      "expression": "`usage_month`"
+                    },
+                    {
+                      "name": "genie_product",
+                      "expression": "`genie_product`"
+                    },
+                    {
+                      "name": "access_channel",
+                      "expression": "`access_channel`"
+                    },
+                    {
+                      "name": "total_dbus",
+                      "expression": "`total_dbus`"
+                    },
+                    {
+                      "name": "free_dbus",
+                      "expression": "`free_dbus`"
+                    },
+                    {
+                      "name": "billed_dbus",
+                      "expression": "`billed_dbus`"
+                    },
+                    {
+                      "name": "billing_identities",
+                      "expression": "`billing_identities`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "table",
+              "encodings": {
+                "columns": [
+                  {
+                    "fieldName": "usage_month",
+                    "displayName": "Usage Month"
+                  },
+                  {
+                    "fieldName": "genie_product",
+                    "displayName": "Genie Product"
+                  },
+                  {
+                    "fieldName": "access_channel",
+                    "displayName": "Access Channel"
+                  },
+                  {
+                    "fieldName": "total_dbus",
+                    "displayName": "Total Dbus"
+                  },
+                  {
+                    "fieldName": "free_dbus",
+                    "displayName": "Free Dbus"
+                  },
+                  {
+                    "fieldName": "billed_dbus",
+                    "displayName": "Billed Dbus"
+                  },
+                  {
+                    "fieldName": "billing_identities",
+                    "displayName": "Billing Identities"
+                  }
+                ]
+              },
+              "frame": {
+                "title": "Monthly Product and Channel Breakdown",
+                "showTitle": true
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 9,
+            "width": 12,
+            "height": 7
+          }
+        },
+        {
+          "widget": {
+            "name": "channel_identity_table",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "channel_identities_30d",
+                  "fields": [
+                    {
+                      "name": "registered_display_name",
+                      "expression": "`registered_display_name`"
+                    },
+                    {
+                      "name": "identity_type",
+                      "expression": "`identity_type`"
+                    },
+                    {
+                      "name": "business_owner",
+                      "expression": "`business_owner`"
+                    },
+                    {
+                      "name": "business_purpose",
+                      "expression": "`business_purpose`"
+                    },
+                    {
+                      "name": "genie_product",
+                      "expression": "`genie_product`"
+                    },
+                    {
+                      "name": "access_channel",
+                      "expression": "`access_channel`"
+                    },
+                    {
+                      "name": "total_dbus",
+                      "expression": "`total_dbus`"
+                    },
+                    {
+                      "name": "billed_dbus",
+                      "expression": "`billed_dbus`"
+                    },
+                    {
+                      "name": "estimated_list_usd",
+                      "expression": "`estimated_list_usd`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "table",
+              "encodings": {
+                "columns": [
+                  {
+                    "fieldName": "registered_display_name",
+                    "displayName": "Registered Display Name"
+                  },
+                  {
+                    "fieldName": "identity_type",
+                    "displayName": "Identity Type"
+                  },
+                  {
+                    "fieldName": "business_owner",
+                    "displayName": "Business Owner"
+                  },
+                  {
+                    "fieldName": "business_purpose",
+                    "displayName": "Business Purpose"
+                  },
+                  {
+                    "fieldName": "genie_product",
+                    "displayName": "Genie Product"
+                  },
+                  {
+                    "fieldName": "access_channel",
+                    "displayName": "Access Channel"
+                  },
+                  {
+                    "fieldName": "total_dbus",
+                    "displayName": "Total Dbus"
+                  },
+                  {
+                    "fieldName": "billed_dbus",
+                    "displayName": "Billed Dbus"
+                  },
+                  {
+                    "fieldName": "estimated_list_usd",
+                    "displayName": "Estimated List Usd"
+                  }
+                ]
+              },
+              "frame": {
+                "title": "Who Uses Genie via API or UI (Last 30 Days)",
+                "showTitle": true,
+                "description": "UUID-style IDs require verification; this is not a definitive identity classification.",
+                "showDescription": true
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 16,
+            "width": 12,
+            "height": 8
+          }
+        }
+      ]
+    },
+    {
+      "name": "05_investigations",
+      "displayName": "05 Agent Investigations",
+      "pageType": "PAGE_TYPE_CANVAS",
+      "layoutVersion": "GRID_V1",
+      "layout": [
+        {
+          "widget": {
+            "name": "investigation_intro",
+            "multilineTextboxSpec": {
+              "lines": [
+                "## Genie Agent Investigations\n",
+                "\n",
+                "Audit actions, SQL execution and table lineage. Access is permission-dependent; billing is not an event-level join key."
+              ]
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 0,
+            "width": 12,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "agent_audit_actions",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "agent_audit_90d",
+                  "fields": [
+                    {
+                      "name": "action_name",
+                      "expression": "`action_name`"
+                    },
+                    {
+                      "name": "sum(audit_events)",
+                      "expression": "SUM(`audit_events`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "bar",
+              "encodings": {
+                "x": {
+                  "fieldName": "action_name",
+                  "scale": {
+                    "type": "categorical"
+                  }
+                },
+                "y": {
+                  "fieldName": "sum(audit_events)",
+                  "scale": {
+                    "type": "quantitative"
+                  }
+                }
+              },
+              "frame": {
+                "title": "Genie Agent API and UI Audit Actions",
+                "showTitle": true
+              },
+              "mark": {
+                "layout": "group"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 2,
+            "width": 6,
+            "height": 6
+          }
+        },
+        {
+          "widget": {
+            "name": "agent_query_by_space",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "agent_query_90d",
+                  "fields": [
+                    {
+                      "name": "genie_space_id",
+                      "expression": "`genie_space_id`"
+                    },
+                    {
+                      "name": "sum(statements)",
+                      "expression": "SUM(`statements`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "bar",
+              "encodings": {
+                "x": {
+                  "fieldName": "genie_space_id",
+                  "scale": {
+                    "type": "categorical"
+                  }
+                },
+                "y": {
+                  "fieldName": "sum(statements)",
+                  "scale": {
+                    "type": "quantitative"
+                  }
+                }
+              },
+              "frame": {
+                "title": "Executed SQL by Genie Agent",
+                "showTitle": true
+              },
+              "mark": {
+                "layout": "group"
+              }
+            }
+          },
+          "position": {
+            "x": 6,
+            "y": 2,
+            "width": 6,
+            "height": 6
+          }
+        },
+        {
+          "widget": {
+            "name": "agent_audit_table",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "agent_audit_90d",
+                  "fields": [
+                    {
+                      "name": "registered_display_name",
+                      "expression": "`registered_display_name`"
+                    },
+                    {
+                      "name": "business_owner",
+                      "expression": "`business_owner`"
+                    },
+                    {
+                      "name": "business_purpose",
+                      "expression": "`business_purpose`"
+                    },
+                    {
+                      "name": "genie_space_id",
+                      "expression": "`genie_space_id`"
+                    },
+                    {
+                      "name": "action_name",
+                      "expression": "`action_name`"
+                    },
+                    {
+                      "name": "audit_events",
+                      "expression": "`audit_events`"
+                    },
+                    {
+                      "name": "conversations_seen",
+                      "expression": "`conversations_seen`"
+                    },
+                    {
+                      "name": "last_event_time",
+                      "expression": "`last_event_time`"
+                    },
+                    {
+                      "name": "sample_user_agent",
+                      "expression": "`sample_user_agent`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "table",
+              "encodings": {
+                "columns": [
+                  {
+                    "fieldName": "registered_display_name",
+                    "displayName": "Registered Display Name"
+                  },
+                  {
+                    "fieldName": "business_owner",
+                    "displayName": "Business Owner"
+                  },
+                  {
+                    "fieldName": "business_purpose",
+                    "displayName": "Business Purpose"
+                  },
+                  {
+                    "fieldName": "genie_space_id",
+                    "displayName": "Genie Space Id"
+                  },
+                  {
+                    "fieldName": "action_name",
+                    "displayName": "Action Name"
+                  },
+                  {
+                    "fieldName": "audit_events",
+                    "displayName": "Audit Events"
+                  },
+                  {
+                    "fieldName": "conversations_seen",
+                    "displayName": "Conversations Seen"
+                  },
+                  {
+                    "fieldName": "last_event_time",
+                    "displayName": "Last Event Time"
+                  },
+                  {
+                    "fieldName": "sample_user_agent",
+                    "displayName": "Sample User Agent"
+                  }
+                ]
+              },
+              "frame": {
+                "title": "Who Accessed Which Genie Agent and How",
+                "showTitle": true,
+                "description": "Audit identity is raw evidence; action counts are not prompt content.",
+                "showDescription": true
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 8,
+            "width": 12,
+            "height": 7
+          }
+        },
+        {
+          "widget": {
+            "name": "agent_queries_table",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "agent_query_90d",
+                  "fields": [
+                    {
+                      "name": "genie_space_id",
+                      "expression": "`genie_space_id`"
+                    },
+                    {
+                      "name": "executed_by",
+                      "expression": "`executed_by`"
+                    },
+                    {
+                      "name": "executed_as",
+                      "expression": "`executed_as`"
+                    },
+                    {
+                      "name": "warehouse_id",
+                      "expression": "`warehouse_id`"
+                    },
+                    {
+                      "name": "statements",
+                      "expression": "`statements`"
+                    },
+                    {
+                      "name": "failed_statements",
+                      "expression": "`failed_statements`"
+                    },
+                    {
+                      "name": "p95_duration_seconds",
+                      "expression": "`p95_duration_seconds`"
+                    },
+                    {
+                      "name": "read_gib",
+                      "expression": "`read_gib`"
+                    },
+                    {
+                      "name": "last_query_time",
+                      "expression": "`last_query_time`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "table",
+              "encodings": {
+                "columns": [
+                  {
+                    "fieldName": "genie_space_id",
+                    "displayName": "Genie Space Id"
+                  },
+                  {
+                    "fieldName": "executed_by",
+                    "displayName": "Executed By"
+                  },
+                  {
+                    "fieldName": "executed_as",
+                    "displayName": "Executed As"
+                  },
+                  {
+                    "fieldName": "warehouse_id",
+                    "displayName": "Warehouse Id"
+                  },
+                  {
+                    "fieldName": "statements",
+                    "displayName": "Statements"
+                  },
+                  {
+                    "fieldName": "failed_statements",
+                    "displayName": "Failed Statements"
+                  },
+                  {
+                    "fieldName": "p95_duration_seconds",
+                    "displayName": "P95 Duration Seconds"
+                  },
+                  {
+                    "fieldName": "read_gib",
+                    "displayName": "Read Gib"
+                  },
+                  {
+                    "fieldName": "last_query_time",
+                    "displayName": "Last Query Time"
+                  }
+                ]
+              },
+              "frame": {
+                "title": "Genie Agent SQL Execution and Identity",
+                "showTitle": true
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 15,
+            "width": 12,
+            "height": 7
+          }
+        },
+        {
+          "widget": {
+            "name": "agent_reads_table",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "agent_table_reads_90d",
+                  "fields": [
+                    {
+                      "name": "genie_space_id",
+                      "expression": "`genie_space_id`"
+                    },
+                    {
+                      "name": "recorded_identity",
+                      "expression": "`recorded_identity`"
+                    },
+                    {
+                      "name": "source_table_full_name",
+                      "expression": "`source_table_full_name`"
+                    },
+                    {
+                      "name": "statements_with_lineage",
+                      "expression": "`statements_with_lineage`"
+                    },
+                    {
+                      "name": "last_read_time",
+                      "expression": "`last_read_time`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "table",
+              "encodings": {
+                "columns": [
+                  {
+                    "fieldName": "genie_space_id",
+                    "displayName": "Genie Space Id"
+                  },
+                  {
+                    "fieldName": "recorded_identity",
+                    "displayName": "Recorded Identity"
+                  },
+                  {
+                    "fieldName": "source_table_full_name",
+                    "displayName": "Source Table Full Name"
+                  },
+                  {
+                    "fieldName": "statements_with_lineage",
+                    "displayName": "Statements With Lineage"
+                  },
+                  {
+                    "fieldName": "last_read_time",
+                    "displayName": "Last Read Time"
+                  }
+                ]
+              },
+              "frame": {
+                "title": "Which Governed Tables Were Read",
+                "showTitle": true,
+                "description": "Lineage coverage is best-effort and not proof that all agent messages ran SQL.",
+                "showDescription": true
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 22,
+            "width": 12,
+            "height": 8
+          }
+        }
+      ]
+    }
+  ],
+  "uiSettings": {
+    "theme": {
+      "canvasBackgroundColor": {
+        "light": "#0A1120",
+        "dark": "#0A1120"
+      },
+      "widgetBackgroundColor": {
+        "light": "#101C30",
+        "dark": "#101C30"
+      },
+      "widgetBorderColor": {
+        "light": "#101C30",
+        "dark": "#101C30"
+      },
+      "fontColor": {
+        "light": "#EDF4FF",
+        "dark": "#EDF4FF"
+      },
+      "selectionColor": {
+        "light": "#A98AFF",
+        "dark": "#A98AFF"
+      },
+      "visualizationColors": [
+        "#A98AFF",
+        "#49D3EA",
+        "#52D7B2",
+        "#FFBC70",
+        "#FA7998",
+        "#6D9FF8",
+        "#BE8FED"
+      ],
+      "widgetHeaderAlignment": "LEFT",
+      "widgetCornerRadius": 14,
+      "fontFamily": "Inter"
+    },
+    "applyModeEnabled": false
+  }
+}
