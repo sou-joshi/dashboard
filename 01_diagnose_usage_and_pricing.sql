@@ -94,3 +94,51 @@ ORDER BY
     total_dbus DESC;
 
 
+
+
+SELECT
+    event_time,
+    workspace_id,
+    action_name,
+    user_identity.email AS caller,
+    user_identity.subject_name AS subject_name,
+    request_params['space_id'] AS agent_id,
+    request_params['conversation_id'] AS conversation_id,
+    request_params['message_id'] AS message_id,
+    source_ip_address,
+    user_agent,
+    response.status_code AS status_code
+FROM system.access.audit
+WHERE service_name = 'aibiGenie'
+  AND event_date >= DATE_SUB(CURRENT_DATE(), 90)
+  AND LOWER(TO_JSON(user_identity)) LIKE
+      CONCAT(
+          '%',
+          LOWER('PASTE_SERVICE_PRINCIPAL_UUID'),
+          '%'
+      )
+ORDER BY event_time DESC
+LIMIT 200;
+
+
+SELECT
+    start_time,
+    workspace_id,
+    statement_id,
+    query_source.genie_space_id AS agent_id,
+    executed_by,
+    executed_as,
+    execution_status,
+    compute.warehouse_id AS warehouse_id,
+    ROUND(total_duration_ms / 1000.0, 2)
+        AS execution_seconds,
+    statement_text,
+    error_message
+FROM system.query.history
+WHERE query_source.genie_space_id =
+      'PASTE_AGENT_ID'
+  AND start_time >= CURRENT_TIMESTAMP() - INTERVAL 90 DAYS
+ORDER BY start_time DESC
+LIMIT 200;
+
+
